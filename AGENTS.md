@@ -1,5 +1,8 @@
 # Tip-State Nitro Constraints
 
+- Canonical fork: `https://github.com/maurodelazeri/tip-state-robinhood-nitro`.
+  Keep official Nitro refs on the read-only `upstream` remote; `origin` is for
+  product `main` and immutable `tipstate-upstream-*` provenance tags only.
 - Read `TIP_STATE_FORK.md` before changing this fork. Preserve the annotated
   upstream base tag and exact functional lineage.
 - The intended product branch is `main`. Keep upstream Nitro source unchanged

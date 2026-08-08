@@ -9,6 +9,8 @@ RPC endpoint.
 
 ## Upstream provenance
 
+- Canonical fork: `https://github.com/maurodelazeri/tip-state-robinhood-nitro`
+- Canonical paired runtime: `https://github.com/maurodelazeri/tip-state-robinhood-runtime`
 - Official upstream: `https://github.com/OffchainLabs/nitro.git`
 - Upstream release: `v3.11.2`
 - Fork-point commit: `3599acae1ad2fab4059fc46453c9cd3294126641`
@@ -81,3 +83,7 @@ For every Nitro upgrade:
    before deployment promotion.
 
 Never move a qualified base tag or bypass the paired materializer.
+
+Only `main` and immutable `tipstate-upstream-*` provenance tags belong on the
+fork's `origin`. Keep official branches and tags on the read-only `upstream`
+remote; never mirror them into the product namespace.
