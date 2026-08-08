@@ -298,7 +298,14 @@ type ExecutionEngine struct {
 	transactionFiltererRPCClient   *TransactionFiltererRPCClient
 	filteringReportRPCClient       *FilteringReportRPCClient
 	disableDelayedSequencingFilter bool
+
+	canonicalStateHook   *createBlocksLockedStateHook
+	canonicalStateScope  *core.CanonicalStateScope
+	canonicalStateFatal  func(error)
+	canonicalStatePoison atomic.Pointer[canonicalStateFailure]
 }
+
+type canonicalStateFailure struct{ err error }
 
 func NewL1PriceData() *L1PriceData {
 	return &L1PriceData{
@@ -480,6 +487,186 @@ func (s *ExecutionEngine) SetConsensus(consensus consensus.FullConsensusClient) 
 	s.consensus = consensus
 }
 
+// SetCanonicalStateHook installs a synchronous flat tip-state producer only if
+// Geth's canonical head still exactly matches the header used to seed it. The
+// comparison and hook installation are atomic under Geth's chain mutex. Every
+// callback requires both createBlocksMutex and an ExecutionEngine-owned scope
+// around the exact Geth mutation; unexpected call paths fail before canonical
+// head publication. fatal must make the error terminal and must not block.
+func (s *ExecutionEngine) SetCanonicalStateHook(hook core.CanonicalStateHook, expectedHead *types.Header, fatal func(error)) error {
+	if s.Started() {
+		return errors.New("trying to set canonical state hook after start")
+	}
+	if hook == nil {
+		return errors.New("canonical state hook is nil")
+	}
+	if fatal == nil {
+		return errors.New("canonical state hook requires a fatal error callback")
+	}
+	wrapper := &createBlocksLockedStateHook{engine: s, inner: hook}
+	scope, err := s.bc.SetCanonicalStateHookAtHead(wrapper, expectedHead)
+	if err != nil {
+		return err
+	}
+	wrapper.scope = scope
+	s.canonicalStateHook = wrapper
+	s.canonicalStateScope = scope
+	s.canonicalStateFatal = fatal
+	return nil
+}
+
+type createBlocksLockedStateHook struct {
+	engine *ExecutionEngine
+	inner  core.CanonicalStateHook
+	scope  *core.CanonicalStateScope
+	active core.CanonicalStateReorgFrame
+}
+
+func (h *createBlocksLockedStateHook) mutexHeld() error {
+	if h.engine.createBlocksMutex.TryLock() {
+		h.engine.createBlocksMutex.Unlock()
+		return errors.New("canonical state hook invoked without createBlocksMutex")
+	}
+	return nil
+}
+
+func (h *createBlocksLockedStateHook) authorizeCallback(scope *core.CanonicalStateScope) error {
+	if err := h.engine.canonicalStatePoisoned(); err != nil {
+		return err
+	}
+	if scope == nil || scope != h.scope || scope != h.engine.canonicalStateScope {
+		return h.engine.poisonCanonicalState(errors.New("canonical state hook received a foreign Geth scope"))
+	}
+	if err := h.mutexHeld(); err != nil {
+		return h.engine.poisonCanonicalState(err)
+	}
+	return nil
+}
+
+func (h *createBlocksLockedStateHook) PrepareBlock(scope *core.CanonicalStateScope, oldHead, newHead *types.Header, update *state.FlatStateUpdate) (core.PreparedCanonicalState, error) {
+	if err := h.authorizeCallback(scope); err != nil {
+		return nil, err
+	}
+	if h.active != nil {
+		prepared, err := h.active.PrepareBlock(oldHead, newHead, update)
+		if err != nil {
+			return nil, h.engine.poisonCanonicalState(fmt.Errorf("stage reorg block: %w", err))
+		}
+		return prepared, nil
+	}
+	prepared, err := h.inner.PrepareBlock(scope, oldHead, newHead, update)
+	if err != nil {
+		return nil, h.engine.poisonCanonicalState(fmt.Errorf("stage canonical block: %w", err))
+	}
+	return prepared, nil
+}
+
+func (h *createBlocksLockedStateHook) PrepareRewind(scope *core.CanonicalStateScope, oldHead, newHead *types.Header) (core.PreparedCanonicalState, error) {
+	if err := h.authorizeCallback(scope); err != nil {
+		return nil, err
+	}
+	if h.active != nil {
+		prepared, err := h.active.PrepareRewind(oldHead, newHead)
+		if err != nil {
+			return nil, h.engine.poisonCanonicalState(fmt.Errorf("stage reorg rewind: %w", err))
+		}
+		return prepared, nil
+	}
+	prepared, err := h.inner.PrepareRewind(scope, oldHead, newHead)
+	if err != nil {
+		return nil, h.engine.poisonCanonicalState(fmt.Errorf("stage canonical rewind: %w", err))
+	}
+	return prepared, nil
+}
+
+func (h *createBlocksLockedStateHook) BeginReorg(oldHead, targetHead *types.Header) (core.CanonicalStateReorgFrame, error) {
+	// Geth never calls this method. ExecutionEngine.Reorg must own the complete
+	// outer frame so a rewind and all replacement blocks publish only once.
+	return nil, h.engine.poisonCanonicalState(errors.New("canonical state reorg frame requested outside ExecutionEngine.Reorg"))
+}
+
+func (h *createBlocksLockedStateHook) beginReorg(oldHead, targetHead *types.Header) error {
+	if err := h.engine.canonicalStatePoisoned(); err != nil {
+		return err
+	}
+	if err := h.mutexHeld(); err != nil {
+		return h.engine.poisonCanonicalState(err)
+	}
+	if h.active != nil {
+		return h.engine.poisonCanonicalState(errors.New("canonical state reorg frame already active"))
+	}
+	frame, err := h.inner.BeginReorg(oldHead, targetHead)
+	if err != nil {
+		return h.engine.poisonCanonicalState(fmt.Errorf("begin canonical state reorg: %w", err))
+	}
+	if frame == nil {
+		return h.engine.poisonCanonicalState(errors.New("canonical state hook returned nil reorg frame"))
+	}
+	h.active = frame
+	return nil
+}
+
+func (h *createBlocksLockedStateHook) publishReorg() (err error) {
+	if mutexErr := h.mutexHeld(); mutexErr != nil {
+		return h.engine.poisonCanonicalState(mutexErr)
+	}
+	if h.active == nil {
+		return h.engine.poisonCanonicalState(errors.New("canonical state reorg frame is not active"))
+	}
+	frame := h.active
+	h.active = nil
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = h.engine.poisonCanonicalState(fmt.Errorf("publish canonical state reorg panicked: %v", recovered))
+		}
+	}()
+	frame.Publish()
+	return nil
+}
+
+func (h *createBlocksLockedStateHook) abortReorg() (err error) {
+	if h.active == nil {
+		return nil
+	}
+	frame := h.active
+	h.active = nil
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = h.engine.poisonCanonicalState(fmt.Errorf("abort canonical state reorg panicked: %v", recovered))
+		}
+	}()
+	frame.Abort()
+	return nil
+}
+
+func (s *ExecutionEngine) poisonCanonicalState(cause error) error {
+	if existing := s.canonicalStatePoison.Load(); existing != nil {
+		return existing.err
+	}
+	failure := &canonicalStateFailure{err: fmt.Errorf("fatal canonical flat-state producer failure: %w", cause)}
+	if s.canonicalStatePoison.CompareAndSwap(nil, failure) {
+		if s.canonicalStateFatal != nil {
+			s.canonicalStateFatal(failure.err)
+		}
+		return failure.err
+	}
+	return s.canonicalStatePoison.Load().err
+}
+
+func (s *ExecutionEngine) canonicalStatePoisoned() error {
+	if failure := s.canonicalStatePoison.Load(); failure != nil {
+		return failure.err
+	}
+	return nil
+}
+
+func (s *ExecutionEngine) canonicalStateResult(err error) error {
+	if err != nil && errors.Is(err, core.ErrCanonicalStateHook) {
+		return s.poisonCanonicalState(err)
+	}
+	return err
+}
+
 func (s *ExecutionEngine) BlockMetadataAtMessageIndex(ctx context.Context, msgIdx arbutil.MessageIndex) (common.BlockMetadata, error) {
 	if s.consensus != nil {
 		return s.consensus.BlockMetadataAtMessageIndex(msgIdx).Await(ctx)
@@ -491,7 +678,10 @@ func (s *ExecutionEngine) GetBatchFetcher() consensus.BatchFetcher {
 	return s.consensus
 }
 
-func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newMessages []arbostypes.MessageWithMetadataAndBlockInfo, oldMessages []*arbostypes.MessageWithMetadata) ([]*execution.MessageResult, error) {
+func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newMessages []arbostypes.MessageWithMetadataAndBlockInfo, oldMessages []*arbostypes.MessageWithMetadata) (results []*execution.MessageResult, retErr error) {
+	if err := s.canonicalStatePoisoned(); err != nil {
+		return nil, err
+	}
 	if msgIdxOfFirstMsgToAdd == 0 {
 		return nil, errors.New("cannot reorg out genesis")
 	}
@@ -512,6 +702,32 @@ func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newM
 		log.Warn("reorg target block not found", "block", lastBlockNumToKeep)
 		return nil, nil
 	}
+	frameOpen := false
+	if s.canonicalStateHook != nil {
+		currentHead := s.bc.CurrentBlock()
+		if currentHead == nil {
+			return nil, s.poisonCanonicalState(errors.New("canonical state reorg has no current head"))
+		}
+		if err := s.canonicalStateHook.beginReorg(types.CopyHeader(currentHead), lastBlockToKeep.Header()); err != nil {
+			return nil, err
+		}
+		frameOpen = true
+		defer func() {
+			if !frameOpen {
+				return
+			}
+			abortErr := s.canonicalStateHook.abortReorg()
+			cause := retErr
+			if cause == nil {
+				cause = errors.New("canonical state reorg returned without publication")
+			}
+			if abortErr != nil {
+				cause = fmt.Errorf("%v; abort frame: %w", cause, abortErr)
+			}
+			results = nil
+			retErr = s.poisonCanonicalState(fmt.Errorf("canonical state reorg aborted: %w", cause))
+		}()
+	}
 
 	currentSafeBlock := s.bc.CurrentSafeBlock()
 	if currentSafeBlock != nil && lastBlockToKeep.Number().Cmp(currentSafeBlock.Number) < 0 {
@@ -528,7 +744,7 @@ func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newM
 	// reorg Rust-side VM state
 	C.stylus_reorg_vm(C.uint64_t(lastBlockNumToKeep), C.uint32_t(tag))
 
-	err := s.bc.ReorgToOldBlock(lastBlockToKeep)
+	err := s.bc.ReorgToOldBlockWithCanonicalStateScope(s.canonicalStateScope, lastBlockToKeep)
 	if err != nil {
 		return nil, err
 	}
@@ -555,6 +771,12 @@ func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newM
 	}
 	if s.recorder != nil {
 		s.recorder.ReorgTo(lastBlockToKeep.Header())
+	}
+	if s.canonicalStateHook != nil {
+		if err := s.canonicalStateHook.publishReorg(); err != nil {
+			return nil, err
+		}
+		frameOpen = false
 	}
 	if len(oldMessages) > 0 {
 		// Use a select to avoid blocking forever if the resequence goroutine
@@ -660,6 +882,9 @@ func (s *ExecutionEngine) resequenceReorgedMessages(messages []*arbostypes.Messa
 func (s *ExecutionEngine) sequencerWrapper(sequencerFunc func() (*types.Block, error)) (*types.Block, error) {
 	attempts := 0
 	for {
+		if err := s.canonicalStatePoisoned(); err != nil {
+			return nil, err
+		}
 		block, err := func() (*types.Block, error) {
 			s.createBlocksMutex.Lock()
 			defer s.createBlocksMutex.Unlock()
@@ -1057,7 +1282,13 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 }
 
 // must hold createBlockMutex
-func (s *ExecutionEngine) appendBlock(block *types.Block, statedb *state.StateDB, receipts types.Receipts, duration time.Duration) error {
+func (s *ExecutionEngine) appendBlock(block *types.Block, statedb *state.StateDB, receipts types.Receipts, duration time.Duration) (err error) {
+	if poisoned := s.canonicalStatePoisoned(); poisoned != nil {
+		return poisoned
+	}
+	defer func() {
+		err = s.canonicalStateResult(err)
+	}()
 	var logs []*types.Log
 	for _, receipt := range receipts {
 		logs = append(logs, receipt.Logs...)
@@ -1066,11 +1297,11 @@ func (s *ExecutionEngine) appendBlock(block *types.Block, statedb *state.StateDB
 	if s.bc.GetVMConfig().Tracer != nil {
 		// InsertChain is basically WriteBlockAndSetHeadWithTime along with recomputing
 		// the entire block which is also traced which works directly for live-tracing
-		if _, err := s.bc.InsertChain([]*types.Block{block}); err != nil {
+		if _, err := s.bc.InsertChainWithCanonicalStateScope(s.canonicalStateScope, []*types.Block{block}); err != nil {
 			return err
 		}
 	} else {
-		status, err := s.bc.WriteBlockAndSetHeadWithTime(block, receipts, logs, statedb, true, duration)
+		status, err := s.bc.WriteBlockAndSetHeadWithTimeAndCanonicalStateScope(s.canonicalStateScope, block, receipts, logs, statedb, true, duration)
 		if err != nil {
 			return err
 		}
@@ -1214,6 +1445,9 @@ func (s *ExecutionEngine) cacheL1PriceDataOfMsg(msgIdx arbutil.MessageIndex, blo
 // but does not store the block.
 // This helps in filling the cache, so that the next block creation is faster.
 func (s *ExecutionEngine) DigestMessage(msgIdx arbutil.MessageIndex, msg *arbostypes.MessageWithMetadata, msgForPrefetch *arbostypes.MessageWithMetadata) (*execution.MessageResult, error) {
+	if err := s.canonicalStatePoisoned(); err != nil {
+		return nil, err
+	}
 	if !s.createBlocksMutex.TryLock() {
 		return nil, errors.New("createBlock mutex held")
 	}
@@ -1222,6 +1456,9 @@ func (s *ExecutionEngine) DigestMessage(msgIdx arbutil.MessageIndex, msg *arbost
 }
 
 func (s *ExecutionEngine) digestMessageWithBlockMutex(msgIdxToDigest arbutil.MessageIndex, msg *arbostypes.MessageWithMetadata, msgForPrefetch *arbostypes.MessageWithMetadata) (*execution.MessageResult, error) {
+	if err := s.canonicalStatePoisoned(); err != nil {
+		return nil, err
+	}
 	currentHeader, err := s.getCurrentHeader()
 	if err != nil {
 		return nil, err
