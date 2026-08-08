@@ -95,6 +95,12 @@ func TestCanonicalStateHookInstallRequiresSeededHead(t *testing.T) {
 	}
 	defer chain.Stop()
 	execution := &ExecutionEngine{bc: chain}
+	execution.startupLifecycle.Store(startupReady)
+	startupScope, err := execution.AcquireStartupExclusive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer startupScope.Release()
 	hook := new(testCanonicalHook)
 	fatalCalls := 0
 	fatal := func(error) { fatalCalls++ }

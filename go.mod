@@ -4,6 +4,8 @@ go 1.25
 
 replace github.com/ethereum/go-ethereum => ./go-ethereum
 
+replace nitro-tipstate-runtime => ./third_party/nitro-tipstate-runtime
+
 require (
 	cloud.google.com/go/storage v1.43.0
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -40,6 +42,7 @@ require (
 	github.com/mailru/easygo v0.0.0-20190618140210-3c14a0dc985f
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/mitchellh/mapstructure v1.4.1
+	nitro-tipstate-runtime v0.0.0
 	github.com/pkg/errors v0.9.1
 	github.com/r3labs/diff/v3 v3.0.1
 	github.com/redis/go-redis/v9 v9.6.3

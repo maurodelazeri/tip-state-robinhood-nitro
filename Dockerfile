@@ -70,6 +70,7 @@ RUN apt update && apt install -y wabt
 # pinned go version
 RUN curl -L https://golang.org/dl/go1.25.9.linux-`dpkg --print-architecture`.tar.gz | tar -C /usr/local -xzf -
 COPY ./Makefile ./go.mod ./go.sum ./
+COPY ./third_party/nitro-tipstate-runtime/go.mod ./third_party/nitro-tipstate-runtime/go.sum ./third_party/nitro-tipstate-runtime/
 COPY ./arbcompress ./arbcompress
 COPY ./arbos ./arbos
 COPY ./arbstate ./arbstate
@@ -217,6 +218,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get install -y wabt
 COPY go.mod go.sum ./
 COPY go-ethereum/go.mod go-ethereum/go.sum go-ethereum/
+COPY third_party/nitro-tipstate-runtime/go.mod third_party/nitro-tipstate-runtime/go.sum third_party/nitro-tipstate-runtime/
 RUN go mod download
 COPY . ./
 COPY --from=contracts-builder workspace/contracts/build/ contracts/build/

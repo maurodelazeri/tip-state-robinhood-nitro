@@ -47,6 +47,14 @@ type NodeInterface struct {
 	}
 }
 
+// pinnedBlockGasEstimator is implemented by current-generation in-memory
+// backends which can run the canonical gas estimator without exposing the
+// history- and database-bearing ethapi.Backend surface.
+type pinnedBlockGasEstimator interface {
+	RPCGasCap() uint64
+	EstimateGasAtPinnedBlock(context.Context, arbitrum.TransactionArgs) (hexutil.Uint64, error)
+}
+
 var merkleTopic common.Hash
 var l2ToL1TxTopic common.Hash
 var l2ToL1TransactionTopic common.Hash
@@ -510,17 +518,24 @@ func (n NodeInterface) GasEstimateComponents(
 		return 0, 0, nil, nil, errors.New("cannot estimate virtual contract")
 	}
 
-	backend, ok := n.backend.(*arbitrum.APIBackend)
-	if !ok {
-		return 0, 0, nil, nil, errors.New("failed getting API backend")
-	}
-
 	context := n.context
-	gasCap := backend.RPCGasCap()
-	block := rpc.BlockNumberOrHashWithHash(n.header.Hash(), false)
 	args := n.messageArgs(evm, value, to, contractCreation, data)
 
-	totalRaw, err := arbitrum.EstimateGas(context, backend, args, block, nil, nil, gasCap)
+	var (
+		totalRaw hexutil.Uint64
+		gasCap   uint64
+		err      error
+	)
+	if backend, ok := n.backend.(*arbitrum.APIBackend); ok {
+		gasCap = backend.RPCGasCap()
+		block := rpc.BlockNumberOrHashWithHash(n.header.Hash(), false)
+		totalRaw, err = arbitrum.EstimateGas(context, backend, args, block, nil, nil, gasCap)
+	} else if backend, ok := n.backend.(pinnedBlockGasEstimator); ok {
+		gasCap = backend.RPCGasCap()
+		totalRaw, err = backend.EstimateGasAtPinnedBlock(context, args)
+	} else {
+		return 0, 0, nil, nil, errors.New("failed getting API backend")
+	}
 	if err != nil {
 		return 0, 0, nil, nil, err
 	}

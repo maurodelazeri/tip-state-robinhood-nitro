@@ -215,6 +215,7 @@ type Config struct {
 	ConsensusRPCClient          rpcclient.ClientConfig     `koanf:"consensus-rpc-client" reload:"hot"`
 	DisableArbOwnerEthCall      bool                       `koanf:"disable-arbowner-ethcall"`
 	LegacyZeroBaseFeeUntil      uint64                     `koanf:"legacy-zero-base-fee-until"`
+	TipState                    TipStateConfig             `koanf:"tip-state"`
 
 	forwardingTarget string
 }
@@ -249,6 +250,9 @@ func (c *Config) Validate() error {
 	if err := c.ConsensusRPCClient.Validate(); err != nil {
 		return fmt.Errorf("error validating ConsensusRPCClient config: %w", err)
 	}
+	if err := c.TipState.Validate(); err != nil {
+		return fmt.Errorf("error validating tip-state config: %w", err)
+	}
 	return nil
 }
 
@@ -275,6 +279,7 @@ func ConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	LiveTracingConfigAddOptions(prefix+".vmtrace", f)
 	rpcserver.ConfigAddOptions(prefix+".rpc-server", "execution", f)
 	rpcclient.RPCClientAddOptions(prefix+".consensus-rpc-client", f, &ConfigDefault.ConsensusRPCClient)
+	TipStateConfigAddOptions(prefix+".tip-state", f)
 }
 
 type LiveTracingConfig struct {
@@ -314,6 +319,7 @@ var ConfigDefault = Config{
 	ExposeMultiGas:              false,
 	DisableArbOwnerEthCall:      false,
 	LegacyZeroBaseFeeUntil:      0,
+	TipState:                    DefaultTipStateConfig,
 
 	RPCServer: rpcserver.DefaultConfig,
 	ConsensusRPCClient: rpcclient.ClientConfig{
@@ -352,6 +358,8 @@ type ExecutionNode struct {
 	filteringReportRPCClient *FilteringReportRPCClient
 	AddressFilterService     *addressfilter.FilterService
 	EventFilter              *eventfilter.EventFilter
+	tipState                 atomic.Pointer[tipStateRuntime]
+	tipStateFatalErrChan     chan<- error
 }
 
 func CreateExecutionNode(
@@ -578,7 +586,12 @@ func (n *ExecutionNode) MarkFeedStart(to arbutil.MessageIndex) containers.Promis
 	return containers.NewReadyPromise(struct{}{}, nil)
 }
 
-func (n *ExecutionNode) Initialize(ctx context.Context) error {
+func (n *ExecutionNode) Initialize(ctx context.Context) (returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			n.stopTipState()
+		}
+	}()
 	config := n.configFetcher.Get()
 	if config.DisableArbOwnerEthCall {
 		ownerPC := gethhook.GetOwnerPrecompile()
@@ -590,6 +603,9 @@ func (n *ExecutionNode) Initialize(ctx context.Context) error {
 	err := n.ExecEngine.Initialize(config.Caching.StylusLRUCacheCapacity, &config.StylusTarget)
 	if err != nil {
 		return fmt.Errorf("error initializing execution engine: %w", err)
+	}
+	if err := n.initializeTipState(ctx); err != nil {
+		return fmt.Errorf("error initializing tip-state runtime: %w", err)
 	}
 	n.ArbInterface.Initialize(n)
 	err = n.Backend.Start()
@@ -614,7 +630,12 @@ func (n *ExecutionNode) Initialize(ctx context.Context) error {
 }
 
 // not thread safe
-func (n *ExecutionNode) Start(ctxIn context.Context) error {
+func (n *ExecutionNode) Start(ctxIn context.Context) (returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			n.stopTipState()
+		}
+	}()
 	n.StopWaiter.Start(ctxIn, n)
 	ctx, err := n.GetContextSafe()
 	if err != nil {
@@ -656,10 +677,14 @@ func (n *ExecutionNode) Start(ctxIn context.Context) error {
 		n.ParentChain.Start(ctx)
 	}
 	n.bulkBlockMetadataFetcher.Start(ctx)
+	if err := n.startTipState(); err != nil {
+		return fmt.Errorf("error starting tip-state runtime: %w", err)
+	}
 	return nil
 }
 
 func (n *ExecutionNode) StopAndWait() {
+	n.stopTipState()
 	if !n.started.Load() {
 		return
 	}

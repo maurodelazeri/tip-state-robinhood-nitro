@@ -303,6 +303,9 @@ type ExecutionEngine struct {
 	canonicalStateScope  *core.CanonicalStateScope
 	canonicalStateFatal  func(error)
 	canonicalStatePoison atomic.Pointer[canonicalStateFailure]
+
+	startupLifecycle atomic.Uint32
+	startupExclusive atomic.Pointer[StartupExclusiveScope]
 }
 
 type canonicalStateFailure struct{ err error }
@@ -409,7 +412,15 @@ func PopulateStylusTargetCache(targetConfig *StylusTargetConfig) error {
 	return nil
 }
 
-func (s *ExecutionEngine) Initialize(rustCacheCapacityMB uint32, targetConfig *StylusTargetConfig) error {
+func (s *ExecutionEngine) Initialize(rustCacheCapacityMB uint32, targetConfig *StylusTargetConfig) (returnErr error) {
+	if !s.startupLifecycle.CompareAndSwap(startupUninitialized, startupInitializing) {
+		return errors.New("execution engine was already initialized or started")
+	}
+	defer func() {
+		if returnErr != nil {
+			s.startupLifecycle.Store(startupFailed)
+		}
+	}()
 	if rustCacheCapacityMB != 0 {
 		programs.SetWasmLruCacheCapacity(arbmath.SaturatingUMul(uint64(rustCacheCapacityMB), 1024*1024))
 	}
@@ -424,6 +435,7 @@ func (s *ExecutionEngine) Initialize(rustCacheCapacityMB uint32, targetConfig *S
 	})
 	// Establishes the baseline for doubleNativeStackSize (overflow recovery).
 	programs.SetInitialNativeStackSize(targetConfig.NativeStackSize)
+	s.startupLifecycle.Store(startupReady)
 	return nil
 }
 
@@ -494,8 +506,12 @@ func (s *ExecutionEngine) SetConsensus(consensus consensus.FullConsensusClient) 
 // around the exact Geth mutation; unexpected call paths fail before canonical
 // head publication. fatal must make the error terminal and must not block.
 func (s *ExecutionEngine) SetCanonicalStateHook(hook core.CanonicalStateHook, expectedHead *types.Header, fatal func(error)) error {
-	if s.Started() {
-		return errors.New("trying to set canonical state hook after start")
+	startupScope := s.startupExclusive.Load()
+	if startupScope == nil {
+		return errors.New("canonical state hook installation requires startup exclusivity")
+	}
+	if err := startupScope.CheckHeld(); err != nil {
+		return fmt.Errorf("canonical state hook installation requires startup exclusivity: %w", err)
 	}
 	if hook == nil {
 		return errors.New("canonical state hook is nil")
@@ -1555,6 +1571,10 @@ func (s *ExecutionEngine) ArbOSVersionForMessageIndex(msgIdx arbutil.MessageInde
 }
 
 func (s *ExecutionEngine) Start(ctxIn context.Context) error {
+	if !s.startupLifecycle.CompareAndSwap(startupReady, startupStarted) &&
+		!s.startupLifecycle.CompareAndSwap(startupReleased, startupStarted) {
+		return fmt.Errorf("cannot start execution engine in startup lifecycle state %d", s.startupLifecycle.Load())
+	}
 	s.StopWaiter.Start(ctxIn, s)
 
 	ctx, err := s.GetContextSafe()

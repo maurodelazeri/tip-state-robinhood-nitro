@@ -541,7 +541,12 @@ func mainImpl() int {
 
 	var execNode *gethexec.ExecutionNode
 	var consensusNode *arbnode.Node
-	if nodeConfig.Node.ExecutionRPCClient.URL == "" || nodeConfig.Node.ExecutionRPCClient.URL == "self" || nodeConfig.Node.ExecutionRPCClient.URL == "self-auth" {
+	localExecution := nodeConfig.Node.ExecutionRPCClient.URL == "" || nodeConfig.Node.ExecutionRPCClient.URL == "self" || nodeConfig.Node.ExecutionRPCClient.URL == "self-auth"
+	if !localExecution && nodeConfig.Execution.TipState.Enable {
+		log.Error("tip-state requires a same-process execution node; remote execution RPC is configured")
+		return 1
+	}
+	if localExecution {
 		execNode, err = gethexec.CreateExecutionNode(
 			ctx,
 			stack,
@@ -555,6 +560,12 @@ func mainImpl() int {
 		if err != nil {
 			log.Error("failed to create execution node", "err", err)
 			return 1
+		}
+		if nodeConfig.Execution.TipState.Enable {
+			if err := execNode.SetTipStateFatalErrChan(fatalErrChan); err != nil {
+				log.Error("failed to install tip-state fatal error channel", "err", err)
+				return 1
+			}
 		}
 	}
 	consensusNode, err = arbnode.CreateConsensusNode(
