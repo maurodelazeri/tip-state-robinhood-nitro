@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -32,6 +33,8 @@ var productTipStateContract = common.HexToAddress("0x000000000000000000000000000
 
 const productTipStatePrivateKey = "0000000000000000000000000000000000000000000000000000000000000001"
 
+const productTipStateClientVersion = "nitro/vproduct-test/linux-amd64/go-test"
+
 type staticTipStateConfigFetcher struct{ config *Config }
 
 func (f staticTipStateConfigFetcher) Get() *Config { return f.config }
@@ -50,6 +53,15 @@ func TestTipStateSameProcessProductLifecycle(t *testing.T) {
 	node := &ExecutionNode{
 		ExecEngine:    engine,
 		configFetcher: staticTipStateConfigFetcher{config: config},
+	}
+	productAccount := productTipStateSender(t)
+	metadataAccounts := []common.Address{productAccount}
+	if err := node.SetTipStateRPCMetadata(productTipStateClientVersion, metadataAccounts); err != nil {
+		t.Fatalf("set product RPC metadata: %v", err)
+	}
+	metadataAccounts[0] = productTipStateContract
+	if err := node.SetTipStateRPCMetadata(productTipStateClientVersion, nil); err == nil {
+		t.Fatal("duplicate product RPC metadata was accepted")
 	}
 	fatalErrChan := make(chan error, 2)
 	if err := node.SetTipStateHTTPProfile(ramtipstate.DefaultConfig.HTTPProfile); err != nil {
@@ -95,6 +107,7 @@ func TestTipStateSameProcessProductLifecycle(t *testing.T) {
 		t.Fatalf("start product tip-state RPC: %v", err)
 	}
 	endpoint := "http://" + runtime.Address()
+	productTipStateAssertRPCSurface(t, endpoint, runtime.Runtime, productAccount, "0x0")
 	want := common.BigToHash(big.NewInt(42)).Bytes()
 	got := productTipStateEthCall(t, endpoint, productTipStateContract)
 	if !bytes.Equal(got, want) {
@@ -125,6 +138,7 @@ func TestTipStateSameProcessProductLifecycle(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("post-block product eth_call returned 0x%x, want 0x%x", got, want)
 	}
+	productTipStateAssertNonce(t, endpoint, productAccount, "0x1")
 	if attempts := runtime.Generation().Database().FallbackAttempts(); attempts != 0 {
 		t.Fatalf("product runtime attempted %d database fallbacks", attempts)
 	}
@@ -257,6 +271,43 @@ func TestTipStateFatalChannelMustBeBufferedAndPreInitialize(t *testing.T) {
 	}
 }
 
+func TestTipStateRPCMetadataMustBeImmutableOneShotAndPreInitialize(t *testing.T) {
+	if err := new(ExecutionNode).SetTipStateRPCMetadata(productTipStateClientVersion, nil); err == nil {
+		t.Fatal("tip-state RPC metadata was accepted without an execution engine")
+	}
+	engine := new(ExecutionEngine)
+	node := &ExecutionNode{ExecEngine: engine}
+	if err := node.SetTipStateRPCMetadata("", nil); err == nil || !strings.Contains(err.Error(), "client version is empty") {
+		t.Fatalf("empty RPC client version returned %v", err)
+	}
+	first := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	second := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	source := []common.Address{first}
+	if err := node.SetTipStateRPCMetadata(productTipStateClientVersion, source); err != nil {
+		t.Fatalf("set tip-state RPC metadata before initialize: %v", err)
+	}
+	source[0] = second
+	if got := node.tipStateRPCMetadata.accounts; len(got) != 1 || got[0] != first {
+		t.Fatalf("installed account snapshot changed with caller slice: %v", got)
+	}
+	runtimeConfig := DefaultTipStateConfig.runtimeConfig(ramtipstate.DefaultConfig.HTTPProfile, *node.tipStateRPCMetadata)
+	if runtimeConfig.ClientVersion != productTipStateClientVersion {
+		t.Fatalf("runtime client version = %q", runtimeConfig.ClientVersion)
+	}
+	runtimeConfig.Accounts[0] = second
+	if node.tipStateRPCMetadata.accounts[0] != first {
+		t.Fatal("runtime Config retained the installed metadata account slice")
+	}
+	if err := node.SetTipStateRPCMetadata(productTipStateClientVersion, nil); err == nil {
+		t.Fatal("duplicate tip-state RPC metadata was accepted")
+	}
+	engine.startupLifecycle.Store(startupReady)
+	lateNode := &ExecutionNode{ExecEngine: engine}
+	if err := lateNode.SetTipStateRPCMetadata(productTipStateClientVersion, nil); err == nil || !strings.Contains(err.Error(), "before execution-engine initialization") {
+		t.Fatalf("late tip-state RPC metadata returned %v", err)
+	}
+}
+
 func TestTipStateInitializationRequiresInstalledHTTPProfile(t *testing.T) {
 	config := &Config{TipState: DefaultTipStateConfig}
 	config.TipState.Enable = true
@@ -267,10 +318,144 @@ func TestTipStateInitializationRequiresInstalledHTTPProfile(t *testing.T) {
 	if err := node.SetTipStateFatalErrChan(make(chan error, 1)); err != nil {
 		t.Fatalf("set fatal channel: %v", err)
 	}
+	if err := node.SetTipStateRPCMetadata(productTipStateClientVersion, nil); err != nil {
+		t.Fatalf("set RPC metadata: %v", err)
+	}
 	err := node.initializeTipState(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "tip-state HTTP profile was not installed") {
 		t.Fatalf("initialize without HTTP profile returned %v", err)
 	}
+}
+
+func TestTipStateInitializationRequiresInstalledRPCMetadata(t *testing.T) {
+	config := &Config{TipState: DefaultTipStateConfig}
+	config.TipState.Enable = true
+	node := &ExecutionNode{
+		ExecEngine:    new(ExecutionEngine),
+		configFetcher: staticTipStateConfigFetcher{config: config},
+	}
+	if err := node.SetTipStateFatalErrChan(make(chan error, 1)); err != nil {
+		t.Fatalf("set fatal channel: %v", err)
+	}
+	if err := node.SetTipStateHTTPProfile(ramtipstate.DefaultConfig.HTTPProfile); err != nil {
+		t.Fatalf("set HTTP profile: %v", err)
+	}
+	err := node.initializeTipState(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "tip-state RPC metadata was not installed") {
+		t.Fatalf("initialize without RPC metadata returned %v", err)
+	}
+}
+
+func productTipStateAssertRPCSurface(t *testing.T, endpoint string, runtime *ramtipstate.Runtime, account common.Address, nonce string) {
+	t.Helper()
+	var accounts []common.Address
+	productTipStateDecodeResult(t, endpoint, "eth_accounts", `[]`, &accounts)
+	if len(accounts) != 1 || accounts[0] != account {
+		t.Fatalf("eth_accounts = %v, want startup snapshot [%s]", accounts, account)
+	}
+
+	var clientVersion string
+	productTipStateDecodeResult(t, endpoint, "web3_clientVersion", `[]`, &clientVersion)
+	if clientVersion != productTipStateClientVersion {
+		t.Fatalf("web3_clientVersion = %q, want %q", clientVersion, productTipStateClientVersion)
+	}
+
+	generation := runtime.Generation()
+	var networkVersion string
+	productTipStateDecodeResult(t, endpoint, "net_version", `[]`, &networkVersion)
+	if want := generation.ChainID().String(); networkVersion != want {
+		t.Fatalf("net_version = %q, want %q", networkVersion, want)
+	}
+
+	var sha3 common.Hash
+	productTipStateDecodeResult(t, endpoint, "web3_sha3", `["0x"]`, &sha3)
+	if want := crypto.Keccak256Hash(nil); sha3 != want {
+		t.Fatalf("web3_sha3 = %s, want %s", sha3, want)
+	}
+
+	productTipStateAssertNonce(t, endpoint, account, nonce)
+
+	var status struct {
+		Status      string      `json:"status"`
+		Mode        string      `json:"mode"`
+		Generation  string      `json:"generation"`
+		ChainID     string      `json:"chainId"`
+		BlockNumber string      `json:"blockNumber"`
+		BlockHash   common.Hash `json:"blockHash"`
+		StateRoot   common.Hash `json:"stateRoot"`
+	}
+	productTipStateDecodeResult(t, endpoint, "tipstate_status", `[]`, &status)
+	if status.Status != "ready" || status.Mode != generation.Mode().String() ||
+		status.Generation != generation.ID() || status.ChainID != hexutil.EncodeBig(generation.ChainID()) ||
+		status.BlockNumber != hexutil.EncodeUint64(generation.Number()) || status.BlockHash != generation.Hash() ||
+		status.StateRoot != generation.Root() {
+		t.Fatalf("tipstate_status = %+v, does not match generation %s", status, generation.ID())
+	}
+
+	var modules map[string]string
+	productTipStateDecodeResult(t, endpoint, "rpc_modules", `[]`, &modules)
+	wantModules := []string{"debug", "eth", "net", "rpc", "tipstate", "web3"}
+	if len(modules) != len(wantModules) {
+		t.Fatalf("rpc_modules = %v, want exact namespaces %v", modules, wantModules)
+	}
+	for _, module := range wantModules {
+		if modules[module] != "1.0" {
+			t.Fatalf("rpc_modules[%q] = %q, want 1.0", module, modules[module])
+		}
+	}
+}
+
+func productTipStateAssertNonce(t *testing.T, endpoint string, account common.Address, want string) {
+	t.Helper()
+	var nonce string
+	productTipStateDecodeResult(t, endpoint, "eth_getTransactionCount", `["`+account.Hex()+`","latest"]`, &nonce)
+	if nonce != want {
+		t.Fatalf("eth_getTransactionCount(%s) = %q, want %q", account, nonce, want)
+	}
+}
+
+func productTipStateDecodeResult(t *testing.T, endpoint string, method string, params string, target any) {
+	t.Helper()
+	body := []byte(`{"jsonrpc":"2.0","id":99,"method":"` + method + `","params":` + params + `}`)
+	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	encoded, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decode %s response %s: %v", method, encoded, err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("%s RPC error %d: %s", method, decoded.Error.Code, decoded.Error.Message)
+	}
+	if err := json.Unmarshal(decoded.Result, target); err != nil {
+		t.Fatalf("decode %s result %s: %v", method, decoded.Result, err)
+	}
+}
+
+func productTipStateSender(t *testing.T) common.Address {
+	t.Helper()
+	privateKey, err := crypto.HexToECDSA(productTipStatePrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return crypto.PubkeyToAddress(privateKey.PublicKey)
 }
 
 func productTipStateEthCall(t *testing.T, endpoint string, contract common.Address) []byte {

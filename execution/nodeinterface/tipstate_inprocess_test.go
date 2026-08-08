@@ -33,6 +33,8 @@ import (
 
 const nodeInterfaceRobinhoodFixture = "../../third_party/nitro-tipstate-runtime/testdata/conformance/robinhood_eth_call_matrix_1d1a4ae.json"
 
+const nodeInterfaceTipStateClientVersion = "nitro/vnode-interface-test/linux-amd64/go-test"
+
 var (
 	nodeInterfaceEstimateTarget = common.HexToAddress("0x000000000000000000000000000000000000bEEF")
 	nodeInterfaceRevertTarget   = common.HexToAddress("0x000000000000000000000000000000000000bEee")
@@ -47,6 +49,7 @@ func TestInProcessTipStateUsesFullNitroNodeInterfaceFailClosed(t *testing.T) {
 	config := ramtipstate.DefaultConfig
 	config.Listen = "127.0.0.1:0"
 	config.CallTimeout = 5 * time.Second
+	config.ClientVersion = nodeInterfaceTipStateClientVersion
 	runtime, err := ramtipstate.Seed(context.Background(), chain, nodeInterfaceHeldStartupLock{}, config)
 	if err != nil {
 		t.Fatalf("seed in-process tip-state runtime: %v", err)
@@ -152,10 +155,14 @@ func TestInProcessTipStateFullNitroNodeInterfaceCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	metadata, err := rpcserver.NewRPCMetadata(nodeInterfaceTipStateClientVersion, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler, err := rpcserver.NewHandler(store, arbosruntime.NewInProcess(arbosruntime.Config{
 		GasCap:  600_000_000,
 		Timeout: 5 * time.Second,
-	}))
+	}), metadata)
 	if err != nil {
 		t.Fatal(err)
 	}

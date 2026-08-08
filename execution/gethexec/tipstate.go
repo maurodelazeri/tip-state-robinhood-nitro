@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/spf13/pflag"
 
@@ -36,13 +37,22 @@ var DefaultTipStateConfig = TipStateConfig{
 	JournalLimit: ramtipstate.DefaultConfig.JournalLimit,
 }
 
-func (c *TipStateConfig) runtimeConfig(httpProfile ramtipstate.HTTPProfile) ramtipstate.Config {
+// This value exists only to let TipStateConfig.Validate check static product
+// knobs through the runtime validator. initializeTipState never uses it: Seed
+// receives only metadata explicitly installed from the ordinary Nitro node.
+const tipStateConfigValidationClientVersion = "tip-state-config-validation-only"
+
+func (c *TipStateConfig) runtimeConfig(httpProfile ramtipstate.HTTPProfile, metadata tipStateRPCMetadata) ramtipstate.Config {
+	accounts := make([]common.Address, len(metadata.accounts))
+	copy(accounts, metadata.accounts)
 	return ramtipstate.Config{
-		Listen:       c.Listen,
-		GasCap:       c.GasCap,
-		CallTimeout:  c.CallTimeout,
-		JournalLimit: c.JournalLimit,
-		HTTPProfile:  httpProfile,
+		Listen:        c.Listen,
+		GasCap:        c.GasCap,
+		CallTimeout:   c.CallTimeout,
+		JournalLimit:  c.JournalLimit,
+		HTTPProfile:   httpProfile,
+		ClientVersion: metadata.clientVersion,
+		Accounts:      accounts,
 	}
 }
 
@@ -50,7 +60,9 @@ func (c *TipStateConfig) Validate() error {
 	if !c.Enable {
 		return nil
 	}
-	return c.runtimeConfig(ramtipstate.DefaultConfig.HTTPProfile).Validate()
+	return c.runtimeConfig(ramtipstate.DefaultConfig.HTTPProfile, tipStateRPCMetadata{
+		clientVersion: tipStateConfigValidationClientVersion,
+	}).Validate()
 }
 
 func TipStateConfigAddOptions(prefix string, f *pflag.FlagSet) {
@@ -70,6 +82,39 @@ type tipStateRuntime struct {
 // profile supplied by cmd/nitro before execution-engine initialization.
 type tipStateHTTPProfile struct {
 	profile ramtipstate.HTTPProfile
+}
+
+// tipStateRPCMetadata is the immutable process identity captured from the
+// ordinary Nitro endpoint before execution-engine initialization. Accounts are
+// a startup snapshot: the RAM endpoint never retains the account manager.
+type tipStateRPCMetadata struct {
+	clientVersion string
+	accounts      []common.Address
+}
+
+// SetTipStateRPCMetadata supplies the exact ordinary Nitro client identity and
+// a startup snapshot of its account-manager addresses. Both the input slice and
+// the later runtime Config are defensively copied.
+func (n *ExecutionNode) SetTipStateRPCMetadata(clientVersion string, accounts []common.Address) error {
+	if n.tipStateRPCMetadata != nil {
+		return errors.New("tip-state RPC metadata was already set")
+	}
+	if n.ExecEngine == nil {
+		return errors.New("tip-state requires an execution engine")
+	}
+	if n.ExecEngine.startupLifecycle.Load() != startupUninitialized {
+		return errors.New("tip-state RPC metadata must be set before execution-engine initialization")
+	}
+	if clientVersion == "" {
+		return errors.New("tip-state RPC client version is empty")
+	}
+	accountSnapshot := make([]common.Address, len(accounts))
+	copy(accountSnapshot, accounts)
+	n.tipStateRPCMetadata = &tipStateRPCMetadata{
+		clientVersion: clientVersion,
+		accounts:      accountSnapshot,
+	}
+	return nil
 }
 
 // SetTipStateHTTPProfile supplies the ordinary Nitro HTTP/RPC transport
@@ -138,6 +183,9 @@ func (n *ExecutionNode) initializeTipState(ctx context.Context) error {
 	if n.tipStateHTTPProfile == nil {
 		return errors.New("tip-state HTTP profile was not installed")
 	}
+	if n.tipStateRPCMetadata == nil {
+		return errors.New("tip-state RPC metadata was not installed")
+	}
 
 	scope, err := n.ExecEngine.AcquireStartupExclusive()
 	if err != nil {
@@ -148,7 +196,10 @@ func (n *ExecutionNode) initializeTipState(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	runtime, err := ramtipstate.Seed(ctx, chain, scope, config.TipState.runtimeConfig(n.tipStateHTTPProfile.profile))
+	runtime, err := ramtipstate.Seed(ctx, chain, scope, config.TipState.runtimeConfig(
+		n.tipStateHTTPProfile.profile,
+		*n.tipStateRPCMetadata,
+	))
 	if err != nil {
 		return err
 	}

@@ -361,6 +361,7 @@ type ExecutionNode struct {
 	tipState                 atomic.Pointer[tipStateRuntime]
 	tipStateFatalErrChan     chan<- error
 	tipStateHTTPProfile      *tipStateHTTPProfile
+	tipStateRPCMetadata      *tipStateRPCMetadata
 }
 
 func CreateExecutionNode(
