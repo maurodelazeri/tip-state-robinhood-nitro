@@ -562,6 +562,15 @@ func mainImpl() int {
 			return 1
 		}
 		if nodeConfig.Execution.TipState.Enable {
+			httpProfile, err := tipStateHTTPProfile(nodeConfig)
+			if err != nil {
+				log.Error("failed to derive tip-state HTTP profile", "err", err)
+				return 1
+			}
+			if err := execNode.SetTipStateHTTPProfile(httpProfile); err != nil {
+				log.Error("failed to install tip-state HTTP profile", "err", err)
+				return 1
+			}
 			if err := execNode.SetTipStateFatalErrChan(fatalErrChan); err != nil {
 				log.Error("failed to install tip-state fatal error channel", "err", err)
 				return 1

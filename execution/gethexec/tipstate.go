@@ -36,12 +36,13 @@ var DefaultTipStateConfig = TipStateConfig{
 	JournalLimit: ramtipstate.DefaultConfig.JournalLimit,
 }
 
-func (c *TipStateConfig) runtimeConfig() ramtipstate.Config {
+func (c *TipStateConfig) runtimeConfig(httpProfile ramtipstate.HTTPProfile) ramtipstate.Config {
 	return ramtipstate.Config{
 		Listen:       c.Listen,
 		GasCap:       c.GasCap,
 		CallTimeout:  c.CallTimeout,
 		JournalLimit: c.JournalLimit,
+		HTTPProfile:  httpProfile,
 	}
 }
 
@@ -49,7 +50,7 @@ func (c *TipStateConfig) Validate() error {
 	if !c.Enable {
 		return nil
 	}
-	return c.runtimeConfig().Validate()
+	return c.runtimeConfig(ramtipstate.DefaultConfig.HTTPProfile).Validate()
 }
 
 func TipStateConfigAddOptions(prefix string, f *pflag.FlagSet) {
@@ -63,6 +64,37 @@ func TipStateConfigAddOptions(prefix string, f *pflag.FlagSet) {
 type tipStateRuntime struct {
 	*ramtipstate.Runtime
 	fatal func(error)
+}
+
+// tipStateHTTPProfile holds the immutable, defensively copied transport
+// profile supplied by cmd/nitro before execution-engine initialization.
+type tipStateHTTPProfile struct {
+	profile ramtipstate.HTTPProfile
+}
+
+// SetTipStateHTTPProfile supplies the ordinary Nitro HTTP/RPC transport
+// profile before Initialize. The runtime must reproduce the node's configured
+// CORS, vhost, prefix, timeout, body, and batch behavior instead of maintaining
+// a second set of defaults.
+func (n *ExecutionNode) SetTipStateHTTPProfile(profile ramtipstate.HTTPProfile) error {
+	if n.tipStateHTTPProfile != nil {
+		return errors.New("tip-state HTTP profile was already set")
+	}
+	if n.ExecEngine == nil {
+		return errors.New("tip-state requires an execution engine")
+	}
+	if n.ExecEngine.startupLifecycle.Load() != startupUninitialized {
+		return errors.New("tip-state HTTP profile must be set before execution-engine initialization")
+	}
+	if err := profile.Validate(); err != nil {
+		return fmt.Errorf("invalid tip-state HTTP profile: %w", err)
+	}
+	cloned, err := ramtipstate.NewHTTPProfile(profile.Options())
+	if err != nil {
+		return fmt.Errorf("clone tip-state HTTP profile: %w", err)
+	}
+	n.tipStateHTTPProfile = &tipStateHTTPProfile{profile: cloned}
+	return nil
 }
 
 // SetTipStateFatalErrChan supplies Nitro's process-wide fatal channel before
@@ -103,6 +135,9 @@ func (n *ExecutionNode) initializeTipState(ctx context.Context) error {
 	if n.tipStateFatalErrChan == nil {
 		return errors.New("tip-state fatal error channel was not installed")
 	}
+	if n.tipStateHTTPProfile == nil {
+		return errors.New("tip-state HTTP profile was not installed")
+	}
 
 	scope, err := n.ExecEngine.AcquireStartupExclusive()
 	if err != nil {
@@ -113,7 +148,7 @@ func (n *ExecutionNode) initializeTipState(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	runtime, err := ramtipstate.Seed(ctx, chain, scope, config.TipState.runtimeConfig())
+	runtime, err := ramtipstate.Seed(ctx, chain, scope, config.TipState.runtimeConfig(n.tipStateHTTPProfile.profile))
 	if err != nil {
 		return err
 	}

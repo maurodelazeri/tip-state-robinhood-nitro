@@ -360,6 +360,7 @@ type ExecutionNode struct {
 	EventFilter              *eventfilter.EventFilter
 	tipState                 atomic.Pointer[tipStateRuntime]
 	tipStateFatalErrChan     chan<- error
+	tipStateHTTPProfile      *tipStateHTTPProfile
 }
 
 func CreateExecutionNode(

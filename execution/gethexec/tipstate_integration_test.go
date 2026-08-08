@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 	"github.com/offchainlabs/nitro/arbos/l1pricing"
 	"github.com/offchainlabs/nitro/cmd/chaininfo"
 	"github.com/offchainlabs/nitro/statetransfer"
+
+	ramtipstate "nitro-tipstate-runtime/tipstate"
 )
 
 var productTipStateContract = common.HexToAddress("0x000000000000000000000000000000000000cafe")
@@ -49,6 +52,12 @@ func TestTipStateSameProcessProductLifecycle(t *testing.T) {
 		configFetcher: staticTipStateConfigFetcher{config: config},
 	}
 	fatalErrChan := make(chan error, 2)
+	if err := node.SetTipStateHTTPProfile(ramtipstate.DefaultConfig.HTTPProfile); err != nil {
+		t.Fatalf("set product HTTP profile: %v", err)
+	}
+	if err := node.SetTipStateHTTPProfile(ramtipstate.DefaultConfig.HTTPProfile); err == nil {
+		t.Fatal("duplicate product HTTP profile was accepted")
+	}
 	if err := node.SetTipStateFatalErrChan(fatalErrChan); err != nil {
 		t.Fatalf("set product fatal error channel: %v", err)
 	}
@@ -226,12 +235,41 @@ func productTipStateAppendStorageUpdate(t *testing.T, engine *ExecutionEngine, c
 func TestTipStateFatalChannelMustBeBufferedAndPreInitialize(t *testing.T) {
 	engine := new(ExecutionEngine)
 	node := &ExecutionNode{ExecEngine: engine}
+	if err := node.SetTipStateHTTPProfile(ramtipstate.HTTPProfile{}); err == nil {
+		t.Fatal("uninitialized tip-state HTTP profile was accepted")
+	}
+	if err := node.SetTipStateHTTPProfile(ramtipstate.DefaultConfig.HTTPProfile); err != nil {
+		t.Fatalf("set tip-state HTTP profile before initialize: %v", err)
+	}
+	if err := node.SetTipStateHTTPProfile(ramtipstate.DefaultConfig.HTTPProfile); err == nil {
+		t.Fatal("duplicate tip-state HTTP profile was accepted")
+	}
 	if err := node.SetTipStateFatalErrChan(make(chan error)); err == nil {
 		t.Fatal("unbuffered fatal error channel was accepted")
 	}
 	engine.startupLifecycle.Store(startupReady)
+	lateNode := &ExecutionNode{ExecEngine: engine}
+	if err := lateNode.SetTipStateHTTPProfile(ramtipstate.DefaultConfig.HTTPProfile); err == nil {
+		t.Fatal("tip-state HTTP profile was accepted after execution-engine initialization")
+	}
 	if err := node.SetTipStateFatalErrChan(make(chan error, 1)); err == nil {
 		t.Fatal("fatal error channel was accepted after execution-engine initialization")
+	}
+}
+
+func TestTipStateInitializationRequiresInstalledHTTPProfile(t *testing.T) {
+	config := &Config{TipState: DefaultTipStateConfig}
+	config.TipState.Enable = true
+	node := &ExecutionNode{
+		ExecEngine:    new(ExecutionEngine),
+		configFetcher: staticTipStateConfigFetcher{config: config},
+	}
+	if err := node.SetTipStateFatalErrChan(make(chan error, 1)); err != nil {
+		t.Fatalf("set fatal channel: %v", err)
+	}
+	err := node.initializeTipState(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "tip-state HTTP profile was not installed") {
+		t.Fatalf("initialize without HTTP profile returned %v", err)
 	}
 }
 
