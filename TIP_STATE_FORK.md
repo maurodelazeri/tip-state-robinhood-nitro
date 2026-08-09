@@ -39,10 +39,14 @@ from a version string, image tag, or moving upstream branch.
 5. `0c8f425eada133219e4207882d045acaea15a21c` adds the mandatory remote
    three-replica producer lifecycle, fixed Unix proxy boundary, and fatal
    fail-closed cohort coupling.
+6. `613c19158c836c83aa641190734ddfcbeedc9b88` makes the authenticated remote
+   operation ceiling independent of the serving lease, sets the production
+   operation default to five seconds, and requires the longer proxy exchange
+   ceiling to remain strictly greater.
 
 The functional tip-state commit is
-`0c8f425eada133219e4207882d045acaea15a21c`; its tree is
-`350c8c0cd6254e2a9eec2da2dbe24f98a354f526`.
+`613c19158c836c83aa641190734ddfcbeedc9b88`; its tree is
+`e48e8ce92266e6c03333c2a3c2d8d02d8dc156d0`.
 
 ## Two-repository build boundary
 
