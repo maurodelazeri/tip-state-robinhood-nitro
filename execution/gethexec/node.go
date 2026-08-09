@@ -359,6 +359,7 @@ type ExecutionNode struct {
 	AddressFilterService     *addressfilter.FilterService
 	EventFilter              *eventfilter.EventFilter
 	tipState                 atomic.Pointer[tipStateRuntime]
+	tipStateRemote           atomic.Pointer[tipStateRemoteRuntime]
 	tipStateFatalErrChan     chan<- error
 	tipStateHTTPProfile      *tipStateHTTPProfile
 	tipStateRPCMetadata      *tipStateRPCMetadata

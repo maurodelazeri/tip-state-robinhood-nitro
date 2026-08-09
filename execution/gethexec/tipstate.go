@@ -18,23 +18,55 @@ import (
 	ramtipstate "nitro-tipstate-runtime/tipstate"
 )
 
-// TipStateConfig is deliberately opt-in. The endpoint is backed only by the
-// same-process RAM image and ArbOS runtime: it has no database, provider, or
-// upstream RPC fallback.
+// TipStateConfig is deliberately opt-in. Same-process mode serves the local
+// RAM image; remote mode makes an exact three-replica RAM cohort mandatory.
+// Neither mode has a database, provider, or upstream RPC fallback.
 type TipStateConfig struct {
-	Enable       bool          `koanf:"enable"`
-	Listen       string        `koanf:"listen"`
-	GasCap       uint64        `koanf:"gas-cap"`
-	CallTimeout  time.Duration `koanf:"call-timeout"`
-	JournalLimit int           `koanf:"journal-limit"`
+	Enable       bool                 `koanf:"enable"`
+	Mode         string               `koanf:"mode"`
+	Listen       string               `koanf:"listen"`
+	GasCap       uint64               `koanf:"gas-cap"`
+	CallTimeout  time.Duration        `koanf:"call-timeout"`
+	JournalLimit int                  `koanf:"journal-limit"`
+	Remote       TipStateRemoteConfig `koanf:"remote"`
+}
+
+const (
+	TipStateModeSameProcess = "same-process"
+	TipStateModeRemote      = "remote"
+)
+
+// TipStateRemoteConfig fixes the admission policy for one exact mandatory
+// three-member cohort. Nitro derives the active set from those member IDs and
+// generates fresh producer, seed-stream, and request identities per startup;
+// it never discovers or substitutes a replacement member.
+type TipStateRemoteConfig struct {
+	ProxySocket       string        `koanf:"proxy-socket"`
+	ProxyTimeout      time.Duration `koanf:"proxy-timeout"`
+	SeedBatchBytes    uint64        `koanf:"seed-batch-bytes"`
+	LeaseDuration     time.Duration `koanf:"lease-duration"`
+	HeartbeatInterval time.Duration `koanf:"heartbeat-interval"`
+	OperationTimeout  time.Duration `koanf:"operation-timeout"`
+	MembershipEpoch   uint64        `koanf:"membership-epoch"`
+	MemberIDs         []string      `koanf:"member-ids"`
+}
+
+var DefaultTipStateRemoteConfig = TipStateRemoteConfig{
+	ProxyTimeout:      30 * time.Minute,
+	SeedBatchBytes:    32 << 20,
+	LeaseDuration:     2 * time.Second,
+	HeartbeatInterval: 500 * time.Millisecond,
+	OperationTimeout:  time.Second,
 }
 
 var DefaultTipStateConfig = TipStateConfig{
 	Enable:       false,
+	Mode:         TipStateModeSameProcess,
 	Listen:       ramtipstate.DefaultConfig.Listen,
 	GasCap:       ramtipstate.DefaultConfig.GasCap,
 	CallTimeout:  ramtipstate.DefaultConfig.CallTimeout,
 	JournalLimit: ramtipstate.DefaultConfig.JournalLimit,
+	Remote:       DefaultTipStateRemoteConfig,
 }
 
 // This value exists only to let TipStateConfig.Validate check static product
@@ -60,17 +92,34 @@ func (c *TipStateConfig) Validate() error {
 	if !c.Enable {
 		return nil
 	}
-	return c.runtimeConfig(ramtipstate.DefaultConfig.HTTPProfile, tipStateRPCMetadata{
-		clientVersion: tipStateConfigValidationClientVersion,
-	}).Validate()
+	switch c.Mode {
+	case TipStateModeSameProcess:
+		return c.runtimeConfig(ramtipstate.DefaultConfig.HTTPProfile, tipStateRPCMetadata{
+			clientVersion: tipStateConfigValidationClientVersion,
+		}).Validate()
+	case TipStateModeRemote:
+		_, err := c.remoteSettings()
+		return err
+	default:
+		return fmt.Errorf("tip-state mode %q is not %q or %q", c.Mode, TipStateModeSameProcess, TipStateModeRemote)
+	}
 }
 
 func TipStateConfigAddOptions(prefix string, f *pflag.FlagSet) {
-	f.Bool(prefix+".enable", DefaultTipStateConfig.Enable, "enable the same-process RAM-only current-tip JSON-RPC endpoint")
-	f.String(prefix+".listen", DefaultTipStateConfig.Listen, "tip-state HTTP JSON-RPC listen address")
+	f.Bool(prefix+".enable", DefaultTipStateConfig.Enable, "enable the RAM-only current-tip integration")
+	f.String(prefix+".mode", DefaultTipStateConfig.Mode, "tip-state mode: same-process or remote")
+	f.String(prefix+".listen", DefaultTipStateConfig.Listen, "same-process tip-state HTTP JSON-RPC listen address")
 	f.Uint64(prefix+".gas-cap", DefaultTipStateConfig.GasCap, "maximum gas accepted by tip-state call and trace execution")
 	f.Duration(prefix+".call-timeout", DefaultTipStateConfig.CallTimeout, "timeout for one tip-state eth_call")
 	f.Int(prefix+".journal-limit", DefaultTipStateConfig.JournalLimit, "number of committed in-memory deltas retained for atomic reorgs")
+	f.String(prefix+".remote.proxy-socket", DefaultTipStateRemoteConfig.ProxySocket, "clean absolute Unix socket for the mandatory persistent-TCP fanout proxy")
+	f.Duration(prefix+".remote.proxy-timeout", DefaultTipStateRemoteConfig.ProxyTimeout, "seed exchange ceiling; live operations use their shorter cohort deadline")
+	f.Uint64(prefix+".remote.seed-batch-bytes", DefaultTipStateRemoteConfig.SeedBatchBytes, "target bytes per bounded remote seed batch")
+	f.Duration(prefix+".remote.lease-duration", DefaultTipStateRemoteConfig.LeaseDuration, "mandatory cohort serving lease duration")
+	f.Duration(prefix+".remote.heartbeat-interval", DefaultTipStateRemoteConfig.HeartbeatInterval, "mandatory cohort heartbeat interval")
+	f.Duration(prefix+".remote.operation-timeout", DefaultTipStateRemoteConfig.OperationTimeout, "bound for each mandatory live cohort operation")
+	f.Uint64(prefix+".remote.membership-epoch", DefaultTipStateRemoteConfig.MembershipEpoch, "exact nonzero mandatory cohort membership epoch")
+	f.StringSlice(prefix+".remote.member-ids", DefaultTipStateRemoteConfig.MemberIDs, "three exact member IDs in strictly increasing hexadecimal order")
 }
 
 type tipStateRuntime struct {
@@ -186,7 +235,17 @@ func (n *ExecutionNode) initializeTipState(ctx context.Context) error {
 	if n.tipStateRPCMetadata == nil {
 		return errors.New("tip-state RPC metadata was not installed")
 	}
+	switch config.TipState.Mode {
+	case TipStateModeSameProcess:
+		return n.initializeSameProcessTipState(ctx, config)
+	case TipStateModeRemote:
+		return n.initializeRemoteTipState(ctx, config)
+	default:
+		return fmt.Errorf("invalid enabled tip-state mode %q", config.TipState.Mode)
+	}
+}
 
+func (n *ExecutionNode) initializeSameProcessTipState(ctx context.Context, config *Config) error {
 	scope, err := n.ExecEngine.AcquireStartupExclusive()
 	if err != nil {
 		return err
@@ -245,23 +304,38 @@ func (n *ExecutionNode) startTipState() error {
 
 func (n *ExecutionNode) stopTipState() {
 	runtime := n.tipState.Swap(nil)
-	if runtime == nil {
-		return
+	if runtime != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := runtime.Stop(ctx); err != nil {
+			log.Error("failed to stop tip-state runtime", "err", err)
+		}
+		cancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := runtime.Stop(ctx); err != nil {
-		log.Error("failed to stop tip-state runtime", "err", err)
+	remote := n.tipStateRemote.Swap(nil)
+	if remote != nil {
+		if err := remote.hook.Close(); err != nil {
+			log.Error("failed to stop remote tip-state fanout", "err", err)
+		}
 	}
 }
 
 func newTipStateFatalReporter(runtime *ramtipstate.Runtime, fatalErrChan chan<- error) func(error) {
+	return newTipStateFatalReporterWithPoison(runtime.Poison, fatalErrChan)
+}
+
+func newRemoteTipStateFatalReporter(fatalErrChan chan<- error) func(error) {
+	return newTipStateFatalReporterWithPoison(nil, fatalErrChan)
+}
+
+func newTipStateFatalReporterWithPoison(poison func(error), fatalErrChan chan<- error) func(error) {
 	return func(err error) {
 		if err == nil {
 			err = errors.New("unknown tip-state failure")
 		}
 		failure := fmt.Errorf("tip-state runtime failed: %w", err)
-		runtime.Poison(failure)
+		if poison != nil {
+			poison(failure)
+		}
 		select {
 		case fatalErrChan <- failure:
 		default:
