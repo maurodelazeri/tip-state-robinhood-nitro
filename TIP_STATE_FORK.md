@@ -2,10 +2,12 @@
 
 This repository is the Nitro producer and embedding-client fork for the
 Robinhood current-tip RAM runtime. Nitro owns canonical execution, emits the
-complete startup snapshot and ordered committed updates, and hosts the local
-RPC listener. Serving requests execute only against the paired runtime's
-immutable RAM generation; they never fall back to Nitro's database or ordinary
-RPC endpoint.
+complete startup snapshot and ordered committed updates. In `same-process`
+mode it hosts the local RPC listener; in opt-in `remote` mode it synchronously
+fans the seed and every canonical transition to one mandatory three-replica
+RAM cohort through a root-owned Unix proxy and its fixed persistent TCP links.
+Serving requests execute only against immutable RAM generations; they never
+fall back to Nitro's database or ordinary RPC endpoint.
 
 ## Upstream provenance
 
@@ -34,10 +36,13 @@ from a version string, image tag, or moving upstream branch.
    limits.
 4. `633781451f10e4a0284089eb310ee5b9f6c22239` injects the exact Nitro
    client identity and startup account snapshot for the final RPC surface.
+5. `0c8f425eada133219e4207882d045acaea15a21c` adds the mandatory remote
+   three-replica producer lifecycle, fixed Unix proxy boundary, and fatal
+   fail-closed cohort coupling.
 
 The functional tip-state commit is
-`633781451f10e4a0284089eb310ee5b9f6c22239`; its tree is
-`7aea7bc2a7b7e21f0001349621d72a16e505e90f`.
+`0c8f425eada133219e4207882d045acaea15a21c`; its tree is
+`350c8c0cd6254e2a9eec2da2dbe24f98a354f526`.
 
 ## Two-repository build boundary
 
@@ -59,8 +64,8 @@ gitlink commits, flattened submodules, or hand-maintained vendored copies.
 The Nitro-root changes are limited to:
 
 - canonical-hook and startup-exclusivity integration in `execution/gethexec`;
-- same-process lifecycle and configuration in `execution/gethexec` and
-  `cmd/nitro`;
+- explicit same-process and mandatory remote producer lifecycles and cold
+  configuration in `execution/gethexec`, plus process wiring in `cmd/nitro`;
 - the exact NodeInterface compatibility boundary in
   `execution/nodeinterface`;
 - the local module replacement and Docker staging lines; and
