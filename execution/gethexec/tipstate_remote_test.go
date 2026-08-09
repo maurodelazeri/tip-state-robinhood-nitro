@@ -51,7 +51,7 @@ func validRemoteTipStateConfig(t *testing.T, proxySocket string) (TipStateConfig
 	config.Remote.SeedBatchBytes = 4 << 10
 	config.Remote.LeaseDuration = 300 * time.Millisecond
 	config.Remote.HeartbeatInterval = 20 * time.Millisecond
-	config.Remote.OperationTimeout = 100 * time.Millisecond
+	config.Remote.OperationTimeout = 500 * time.Millisecond
 	config.Remote.MembershipEpoch = 7
 	config.Remote.MemberIDs = make([]string, len(members))
 	for index, member := range members {
@@ -80,6 +80,9 @@ func TestTipStateRemoteConfigRequiresExactThreeMemberIdentity(t *testing.T) {
 		settings.servingPolicy.JournalLimit != uint32(valid.JournalLimit) {
 		t.Fatalf("authenticated serving policy = %#v", settings.servingPolicy)
 	}
+	if settings.servingPolicy.OperationTimeoutNanos <= settings.servingPolicy.LeaseDurationNanos {
+		t.Fatalf("operation timeout was not independent of lease: %#v", settings.servingPolicy)
+	}
 
 	tests := []struct {
 		name string
@@ -96,6 +99,7 @@ func TestTipStateRemoteConfigRequiresExactThreeMemberIdentity(t *testing.T) {
 		{"zero epoch", func(c *TipStateConfig) { c.Remote.MembershipEpoch = 0 }, "nonzero"},
 		{"oversized journal", func(c *TipStateConfig) { c.JournalLimit = 257 }, "live bounds"},
 		{"unsafe heartbeat", func(c *TipStateConfig) { c.Remote.HeartbeatInterval = c.Remote.LeaseDuration / 2 }, "heartbeat_interval"},
+		{"unsafe proxy ceiling", func(c *TipStateConfig) { c.Remote.ProxyTimeout = c.Remote.OperationTimeout }, "strictly greater"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -106,6 +110,16 @@ func TestTipStateRemoteConfigRequiresExactThreeMemberIdentity(t *testing.T) {
 				t.Fatalf("Validate error = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestTipStateRemoteProductionTimingDefaults(t *testing.T) {
+	remote := DefaultTipStateRemoteConfig
+	if remote.LeaseDuration != 2*time.Second || remote.HeartbeatInterval != 500*time.Millisecond || remote.OperationTimeout != 5*time.Second {
+		t.Fatalf("remote timing defaults lease=%s heartbeat=%s operation=%s", remote.LeaseDuration, remote.HeartbeatInterval, remote.OperationTimeout)
+	}
+	if remote.ProxyTimeout != 30*time.Minute || remote.ProxyTimeout <= remote.OperationTimeout {
+		t.Fatalf("remote proxy ceiling=%s operation=%s", remote.ProxyTimeout, remote.OperationTimeout)
 	}
 }
 

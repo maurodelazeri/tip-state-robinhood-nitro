@@ -137,6 +137,9 @@ func (c *TipStateConfig) remoteSettings() (tipStateRemoteSettings, error) {
 	if err := settings.servingPolicy.Validate(); err != nil {
 		return tipStateRemoteSettings{}, fmt.Errorf("invalid remote serving policy: %w", err)
 	}
+	if remote.ProxyTimeout <= remote.OperationTimeout {
+		return tipStateRemoteSettings{}, errors.New("remote proxy-timeout must be strictly greater than remote operation-timeout")
+	}
 	settings.proxySocket = remote.ProxySocket
 	settings.proxyTimeout = remote.ProxyTimeout
 	settings.seedBatchBytes = remote.SeedBatchBytes

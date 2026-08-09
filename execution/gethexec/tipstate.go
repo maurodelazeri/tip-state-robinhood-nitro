@@ -56,7 +56,7 @@ var DefaultTipStateRemoteConfig = TipStateRemoteConfig{
 	SeedBatchBytes:    32 << 20,
 	LeaseDuration:     2 * time.Second,
 	HeartbeatInterval: 500 * time.Millisecond,
-	OperationTimeout:  time.Second,
+	OperationTimeout:  5 * time.Second,
 }
 
 var DefaultTipStateConfig = TipStateConfig{
@@ -113,7 +113,7 @@ func TipStateConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	f.Duration(prefix+".call-timeout", DefaultTipStateConfig.CallTimeout, "timeout for one tip-state eth_call")
 	f.Int(prefix+".journal-limit", DefaultTipStateConfig.JournalLimit, "number of committed in-memory deltas retained for atomic reorgs")
 	f.String(prefix+".remote.proxy-socket", DefaultTipStateRemoteConfig.ProxySocket, "clean absolute Unix socket for the mandatory persistent-TCP fanout proxy")
-	f.Duration(prefix+".remote.proxy-timeout", DefaultTipStateRemoteConfig.ProxyTimeout, "seed exchange ceiling; live operations use their shorter cohort deadline")
+	f.Duration(prefix+".remote.proxy-timeout", DefaultTipStateRemoteConfig.ProxyTimeout, "seed exchange ceiling; live operations use their shorter authenticated deadline")
 	f.Uint64(prefix+".remote.seed-batch-bytes", DefaultTipStateRemoteConfig.SeedBatchBytes, "target bytes per bounded remote seed batch")
 	f.Duration(prefix+".remote.lease-duration", DefaultTipStateRemoteConfig.LeaseDuration, "mandatory cohort serving lease duration")
 	f.Duration(prefix+".remote.heartbeat-interval", DefaultTipStateRemoteConfig.HeartbeatInterval, "mandatory cohort heartbeat interval")
