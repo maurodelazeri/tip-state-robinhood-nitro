@@ -1,4 +1,12 @@
 <br />
+
+> [!IMPORTANT]
+> This is the Robinhood tip-state Nitro product fork, not a standalone upstream
+> Nitro build context. Start with [TIP_STATE_FORK.md](./TIP_STATE_FORK.md) for
+> exact provenance, clean-room recovery, paired-runtime materialization,
+> validation, and upstream-sync rules. The upstream Nitro documentation
+> continues below.
+
 <p align="center">
   <a href="https://arbitrum.io/">
     <img src="https://arbitrum.io/assets/arbitrum/logo_color.png" alt="Logo" width="80" height="80">
