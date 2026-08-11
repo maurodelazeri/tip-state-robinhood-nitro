@@ -352,7 +352,10 @@ func (n *ExecutionNode) initializeRemoteTipState(ctx context.Context, config *Co
 	if err := scope.CheckHeld(); err != nil {
 		return fmt.Errorf("startup exclusivity lost before remote canonical hook installation: %w", err)
 	}
-	if manifest == nil || manifest.Header == nil || manifest.Header.Hash() != head.Hash() || manifest.Header.Root != head.Root {
+	if manifest == nil || manifest.Header == nil || manifest.Header.Number == nil || !manifest.Header.Number.IsUint64() || manifest.Block == nil ||
+		manifest.Header.Hash() != head.Hash() || manifest.Header.Root != head.Root ||
+		manifest.Block.Hash() != manifest.Header.Hash() || manifest.Block.Root() != manifest.Header.Root ||
+		manifest.Block.NumberU64() != manifest.Header.Number.Uint64() {
 		return errors.New("remote tip-state seed manifest differs from the bootstrapped head")
 	}
 	if err := n.ExecEngine.SetCanonicalStateHook(hook, manifest.Header, fatal); err != nil {

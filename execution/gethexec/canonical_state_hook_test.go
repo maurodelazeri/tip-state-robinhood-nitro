@@ -39,10 +39,12 @@ type testCanonicalFrame struct {
 	publishes      int
 	aborts         int
 	panicPublish   bool
+	lastBlock      *types.Block
 }
 
-func (f *testCanonicalFrame) PrepareBlock(_, _ *types.Header, _ *state.FlatStateUpdate) (core.PreparedCanonicalState, error) {
+func (f *testCanonicalFrame) PrepareBlock(_ *types.Header, block *types.Block, _ *state.FlatStateUpdate) (core.PreparedCanonicalState, error) {
 	f.blockPrepares++
+	f.lastBlock = block
 	return &testCanonicalPreparation{commits: &f.stepCommits, aborts: &f.stepAborts}, nil
 }
 
@@ -61,12 +63,14 @@ func (f *testCanonicalFrame) Publish() {
 func (f *testCanonicalFrame) Abort() { f.aborts++ }
 
 type testCanonicalHook struct {
-	calls  int
-	frames []*testCanonicalFrame
+	calls     int
+	frames    []*testCanonicalFrame
+	lastBlock *types.Block
 }
 
-func (h *testCanonicalHook) PrepareBlock(_ *core.CanonicalStateScope, _, _ *types.Header, _ *state.FlatStateUpdate) (core.PreparedCanonicalState, error) {
+func (h *testCanonicalHook) PrepareBlock(_ *core.CanonicalStateScope, _ *types.Header, block *types.Block, _ *state.FlatStateUpdate) (core.PreparedCanonicalState, error) {
 	h.calls++
+	h.lastBlock = block
 	return &testCanonicalPreparation{}, nil
 }
 
@@ -85,6 +89,10 @@ func testHeaders() (*types.Header, *types.Header) {
 	oldHead := &types.Header{Number: big.NewInt(7), GasLimit: 1}
 	newHead := &types.Header{Number: big.NewInt(8), ParentHash: oldHead.Hash(), GasLimit: 1}
 	return oldHead, newHead
+}
+
+func testBlock(header *types.Header) *types.Block {
+	return types.NewBlockWithHeader(header)
 }
 
 func TestCanonicalStateHookInstallRequiresSeededHead(t *testing.T) {
@@ -202,14 +210,15 @@ func TestCanonicalStateReorgFramePublishesExactlyOnce(t *testing.T) {
 	engine.canonicalStateHook = hook
 	engine.canonicalStateScope = installedScope
 	oldHead, newHead := testHeaders()
+	newBlock := testBlock(newHead)
 
 	engine.createBlocksMutex.Lock()
 	defer engine.createBlocksMutex.Unlock()
-	if _, err := hook.PrepareBlock(installedScope, oldHead, newHead, nil); err != nil {
+	if _, err := hook.PrepareBlock(installedScope, oldHead, newBlock, nil); err != nil {
 		t.Fatal(err)
 	}
-	if inner.calls != 1 {
-		t.Fatalf("ordinary preparations=%d, want 1", inner.calls)
+	if inner.calls != 1 || inner.lastBlock != newBlock {
+		t.Fatalf("ordinary preparations=%d block=%p, want 1 and exact block %p", inner.calls, inner.lastBlock, newBlock)
 	}
 
 	if err := hook.beginReorg(newHead, oldHead); err != nil {
@@ -222,7 +231,7 @@ func TestCanonicalStateReorgFramePublishesExactlyOnce(t *testing.T) {
 	}
 	prepared.Commit()
 	for i := 0; i < 2; i++ {
-		prepared, err := hook.PrepareBlock(installedScope, oldHead, newHead, nil)
+		prepared, err := hook.PrepareBlock(installedScope, oldHead, newBlock, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,6 +239,9 @@ func TestCanonicalStateReorgFramePublishesExactlyOnce(t *testing.T) {
 	}
 	if frame.publishes != 0 || frame.stepCommits != 3 {
 		t.Fatalf("before publish: publications=%d sealed steps=%d", frame.publishes, frame.stepCommits)
+	}
+	if frame.lastBlock != newBlock {
+		t.Fatalf("reorg frame received block %p, want exact block %p", frame.lastBlock, newBlock)
 	}
 	if err := hook.publishReorg(); err != nil {
 		t.Fatal(err)

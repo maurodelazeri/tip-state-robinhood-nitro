@@ -559,18 +559,18 @@ func (h *createBlocksLockedStateHook) authorizeCallback(scope *core.CanonicalSta
 	return nil
 }
 
-func (h *createBlocksLockedStateHook) PrepareBlock(scope *core.CanonicalStateScope, oldHead, newHead *types.Header, update *state.FlatStateUpdate) (core.PreparedCanonicalState, error) {
+func (h *createBlocksLockedStateHook) PrepareBlock(scope *core.CanonicalStateScope, oldHead *types.Header, newBlock *types.Block, update *state.FlatStateUpdate) (core.PreparedCanonicalState, error) {
 	if err := h.authorizeCallback(scope); err != nil {
 		return nil, err
 	}
 	if h.active != nil {
-		prepared, err := h.active.PrepareBlock(oldHead, newHead, update)
+		prepared, err := h.active.PrepareBlock(oldHead, newBlock, update)
 		if err != nil {
 			return nil, h.engine.poisonCanonicalState(fmt.Errorf("stage reorg block: %w", err))
 		}
 		return prepared, nil
 	}
-	prepared, err := h.inner.PrepareBlock(scope, oldHead, newHead, update)
+	prepared, err := h.inner.PrepareBlock(scope, oldHead, newBlock, update)
 	if err != nil {
 		return nil, h.engine.poisonCanonicalState(fmt.Errorf("stage canonical block: %w", err))
 	}
