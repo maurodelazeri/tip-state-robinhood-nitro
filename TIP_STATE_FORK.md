@@ -43,10 +43,14 @@ from a version string, image tag, or moving upstream branch.
    operation ceiling independent of the serving lease, sets the production
    operation default to five seconds, and requires the longer proxy exchange
    ceiling to remain strictly greater.
+7. `ac09b3c1eac147cb789e341042fc9ac9a31d0e1c` carries the exact canonical
+   block through the committed-state hook and binds remote startup to the full
+   seeded block, allowing the paired runtime to expose a complete tip-only
+   `eth_getBlockByNumber` response without a historical lookup.
 
 The functional tip-state commit is
-`613c19158c836c83aa641190734ddfcbeedc9b88`; its tree is
-`e48e8ce92266e6c03333c2a3c2d8d02d8dc156d0`.
+`ac09b3c1eac147cb789e341042fc9ac9a31d0e1c`; its tree is
+`2f1fa0081e27702d7c571b903138628d77174086`.
 
 ## Two-repository build boundary
 
