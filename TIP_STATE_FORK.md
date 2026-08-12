@@ -85,10 +85,12 @@ interchanged.
 | Exact-block functional tree | `2f1fa0081e27702d7c571b903138628d77174086` |
 | Exact-block documentation checkpoint | `8c64aac64a2f00a854c279bde681e5ed5e2b3206` |
 | Exact-block documentation tree | `5848335991d26afa7961252e5118b36e82259dc6` |
+| Active seed-progress overlay patch SHA-256 | `7ec84baa31a7a1816ecfa4a3c99757c873a6e4c3370266d6a5433038f6e9984b` |
+| Active seed-progress overlay replay tree | `e724deb764e43c8399403ad04b8f36ff2a678fc5` |
 | Uncapped runtime source checkpoint | `37012d98c5aecf4841e755a9522245df32b6c8d1` |
 | Runtime-patched Geth content SHA-256 | `01b66a95178ca6d43b6cd7a5d4a20bdb41e3f0ac38a83c6843b2bf80fa7934da` |
 | Runtime product closure SHA-256 | `d1025104ec974e6570925d1bc5fb53f913194af5b98d9830ab2cf80acb83484d` |
-| Complete Nitro product context SHA-256 | `8db772122fc97aba08d68d10ecbf1e29d09bc3dff1e21c5dfe1903e170a7eb9d` |
+| Complete Nitro product context SHA-256 | `2faee471f241e097fe4ba563e03569ba734d04e3d5e5e839aa90494780636683` |
 | Compiled chain-wire protocol SHA-256 | `f7ad8962c1bbeeb2269a637c859433e43dfe57574afdd3b85d68497427fb2030` |
 
 The runtime checkpoint above removes the product's HTTP request-admission
@@ -102,7 +104,14 @@ Per-request gas, input-body, batch, response, and timeout bounds remain in
 force; they bound individual work and malformed or oversized inputs rather
 than throttling aggregate request rate or concurrency.
 
-The immediately preceding bounded source product is retained as immutable
+The active seed-progress overlay is applied to the exact-block functional
+tree during product materialization. It changes only producer-side seed
+observability; the runtime closure and chain-wire protocol remain unchanged.
+The immediately preceding uncapped context
+`8db772122fc97aba08d68d10ecbf1e29d09bc3dff1e21c5dfe1903e170a7eb9d`
+is retained as historical evidence, not as the active product identity.
+
+The bounded source predecessor is retained as immutable
 lineage only and is revoked for serving: runtime product closure
 `6f5d648b98317b49f2a9e37237a8e227ff8977db29d6966a0fd67c920ae6fe7c`,
 complete Nitro context
@@ -172,6 +181,7 @@ with the committed trees above.
 | `patches/0007-nitro-tipstate-remote-cohort.patch` | Commit `6b039f2ce...` | `d2e1c318e197af8ce9b9465e7ff79a07ad2d97deb95f158250ea889ba91ab691` | Mandatory authenticated three-member remote cohort; produces commit `0c8f425ea...` |
 | `patches/0008-nitro-tipstate-timeout-contract.patch` | Commit `f7cc72cde...` | `df2676f5729c81ecffd02d41e0108e140a6e51e6d15d7a23d399d26cc4277664` | Lease-independent operation timeout; produces commit `613c19158...` |
 | `patches/0009-nitro-exact-canonical-block.patch` | Commit `65c4b8530...` | `3aadfb77db8b370837a29c4034b286364d0610c8c109b5df7f8772c323ff185b` | Complete canonical block in seed and live publications; produces commit `ac09b3c1e...` |
+| `patches/0010-nitro-tipstate-seed-progress.patch` | Commit `ac09b3c1e...` | `7ec84baa31a7a1816ecfa4a3c99757c873a6e4c3370266d6a5433038f6e9984b` | Producer-side immediate seed start plus 30-second accepted-record, payload, and throughput progress; replays to tree `e724deb7...` |
 
 Never regenerate a numbered patch from an unverified worktree or edit a
 published patch in place. A functional change requires a new forward patch,
@@ -193,6 +203,8 @@ Relative to upstream v3.11.2, the product changes only these Nitro areas:
   canonical publication boundary;
 - `execution/gethexec/node.go`, `tipstate.go`, and `tipstate_remote.go` own the
   opt-in same-process/remote lifecycle;
+- `execution/gethexec/tipstate_seed_progress.go` owns producer-side remote-seed
+  progress accounting and logging;
 - `execution/gethexec/startup_exclusive.go` owns the one-shot startup
   capability;
 - `execution/nodeinterface/node_interface.go` admits the narrow pinned-state
@@ -216,15 +228,18 @@ execution/gethexec/tipstate.go
 execution/gethexec/tipstate_integration_test.go
 execution/gethexec/tipstate_remote.go
 execution/gethexec/tipstate_remote_test.go
+execution/gethexec/tipstate_seed_progress.go
+execution/gethexec/tipstate_seed_progress_test.go
 execution/nodeinterface/node_interface.go
 execution/nodeinterface/tipstate_inprocess_test.go
 go.mod
 ```
 
-`AGENTS.md` and this document are the only additional fork-root documentation
-paths at the exact-block functional tip. The current main branch may contain
-later documentation-only recovery changes. No submodule gitlink changes are
-part of the custom boundary.
+The active materialized product adds only the two seed-progress paths above to
+the exact-block functional tree. `AGENTS.md` and this document are the only
+additional fork-root documentation paths at the exact-block functional tip.
+The current main branch may contain later documentation-only recovery changes.
+No submodule gitlink changes are part of the custom boundary.
 
 ## Why this checkout must not be built standalone
 
@@ -378,7 +393,7 @@ pass:
 set -euo pipefail
 bash scripts/materialize-nitro-product.sh
 test "$(bash scripts/hash-nitro-product.sh .product-work/nitro-product)" = \
-  8db772122fc97aba08d68d10ecbf1e29d09bc3dff1e21c5dfe1903e170a7eb9d
+  2faee471f241e097fe4ba563e03569ba734d04e3d5e5e839aa90494780636683
 ```
 
 The materializer does all of the following rather than mutating this checkout:
@@ -386,15 +401,17 @@ The materializer does all of the following rather than mutating this checkout:
 1. verifies both sibling sources and their hashes;
 2. creates a temporary local clone and checks out detached functional commit
    `ac09b3c1eac147cb789e341042fc9ac9a31d0e1c`;
-3. initializes every upstream submodule except `go-ethereum` recursively;
-4. replaces the Geth directory with `.deps/go-ethereum`, whose content hash is
+3. applies authenticated patch 0010 and requires replay tree
+   `e724deb764e43c8399403ad04b8f36ff2a678fc5`;
+4. initializes every upstream submodule except `go-ethereum` recursively;
+5. replaces the Geth directory with `.deps/go-ethereum`, whose content hash is
    already authenticated;
-5. stages only the runtime production closure under
+6. stages only the runtime production closure under
    `third_party/nitro-tipstate-runtime`;
-6. writes `.nitro-tipstate-product` with the functional commit, seven Nitro
+7. writes `.nitro-tipstate-product` with the functional commit, eight Nitro
    patch digests, runtime closure digest, patched-Geth digest, and final product
    digest; and
-7. hashes every product source path, file mode, and symlink target (excluding
+8. hashes every product source path, file mode, and symlink target (excluding
    only Git administration and the provenance marker itself) before atomically
    moving the context into `.product-work/nitro-product`.
 
@@ -403,8 +420,8 @@ Build the producer image from that context:
 ```bash
 set -euo pipefail
 build_stamp=$(date -u +%Y%m%dT%H%M%S%NZ)
-TIPSTATE_BUILD_A="robinhood-nitro-tipstate:v3.11.2-8db77212-repeat-a-$build_stamp"
-TIPSTATE_BUILD_B="robinhood-nitro-tipstate:v3.11.2-8db77212-repeat-b-$build_stamp"
+TIPSTATE_BUILD_A="robinhood-nitro-tipstate:v3.11.2-2faee471-repeat-a-$build_stamp"
+TIPSTATE_BUILD_B="robinhood-nitro-tipstate:v3.11.2-2faee471-repeat-b-$build_stamp"
 for build_tag in "$TIPSTATE_BUILD_A" "$TIPSTATE_BUILD_B"; do
   docker build --provenance=false --network host --target nitro-node \
     --tag "$build_tag" \
@@ -518,11 +535,63 @@ Startup is ordered as follows:
    failure is terminal: the hook is poisoned and Nitro reports through the
    process-wide fatal channel.
 
+Active patch 0010 makes the producer's work visible in Nitro's own container
+log. Nitro emits `starting remote RAM-only tip-state cohort seed` immediately,
+then `seeding remote RAM-only tip-state cohort` every 30 seconds with elapsed
+time, accepted account/storage/code/assembly counts, cumulative logical
+payload bytes/GiB, and interval plus average logical-payload MiB/s. Counts
+advance only after the seed sink accepts a record. Payload rates exclude wire
+framing, acknowledgements, partitions, three-replica fan-out, and other network
+overhead. The one-pass traversal cannot truthfully know a percentage or ETA
+before completion, so `seeded and admitted remote RAM-only tip-state cohort`
+remains the completion signal. Operators can observe these producer-side lines
+with `docker logs --tail 20 -f robinhood`.
+
 Same-process mode remains a tested embedding mode. It constructs the complete
 RAM generation inside Nitro and starts its own listener after initialization.
 It is not the qualified three-cell production topology. In remote mode the
 Nitro process hosts no tip-state public RPC listener and retains no serving
 state image after the seed.
+
+## Normal deployed restart
+
+For an already-installed, unchanged release, restart the whole epoch with one
+command:
+
+```bash
+sudo systemctl restart tip-state-robinhood-container.service
+```
+
+Do not mutate OCI/NLB backend offline or drain flags, start the three cells
+separately, recreate the container, or replace the database during this normal
+restart. The wrapper stops the prior producer epoch and starts its parent and
+proxy dependencies before the same Nitro container. The enabled replicas
+restart empty and unready after the old stream closes. Their `/readyz` health
+automatically withdraws NLB routing during the seed and restores routing only
+after the new generation is admitted.
+
+The validated 2026-08-12 restart invoked that command at
+`23:04:02.968749903Z`. The new container started at
+`23:04:20.542316204Z`, pinned persisted anchor block `34,909,318`, and emitted
+the seed-start line at `23:04:25.218Z`, followed by exact 30-second progress
+heartbeats. Admission completed at `23:22:41.719873267Z`: 18m16.502s after the
+seed-start line and 18m21.178s after container start. Without changing the
+online/non-drain backend flags, readiness and public routing returned by
+`23:23:06.902Z`; the node crossed a fresh target at `23:27:46Z` and was fully
+synced at `23:28:07Z` with local block `34,923,728`, observed tip `34,923,721`,
+and gap zero. Sustained live cadence then advanced 518 blocks in 52.031 seconds
+(9.96 blocks/s), crossed target `34,924,779`, and kept both feed queues at
+zero. The exact public call returned HTTP 200 with a result ending
+`1b972405a2f6347089`. The new container retained the same `StartedAt`, zero
+restarts, and no OOM; the parent, proxy, and wrapper units also had zero
+restarts. A/B/C retained the same PID and invocation with no new-epoch restart;
+their cumulative `NRestarts=3` records earlier stream transitions. Current
+cell memory was approximately 35.58 GB, peak memory approximately 50.6 GB, and
+all OOM counters were zero. The new-epoch error/fatal/panic/OOM scan was empty,
+and OCI ended with every backend online/non-drain and A/B/C, aggregate, and NLB
+health `OK`. A broken-pipe/fatal line from the old epoch at `23:04:05Z` was
+expected teardown before the new container's `StartedAt`, not a failure of the
+new epoch. These timings and resource values are observations, not an SLA.
 
 ## Nitro configuration surface
 

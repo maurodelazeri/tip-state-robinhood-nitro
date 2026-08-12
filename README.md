@@ -9,7 +9,7 @@
 > `37012d98c5aecf4841e755a9522245df32b6c8d1`, runtime product closure
 > `d1025104ec974e6570925d1bc5fb53f913194af5b98d9830ab2cf80acb83484d`,
 > complete Nitro product context
-> `8db772122fc97aba08d68d10ecbf1e29d09bc3dff1e21c5dfe1903e170a7eb9d`,
+> `2faee471f241e097fe4ba563e03569ba734d04e3d5e5e839aa90494780636683`,
 > and chain-wire protocol
 > `f7ad8962c1bbeeb2269a637c859433e43dfe57574afdd3b85d68497427fb2030`.
 > It defines no product RPS limit and no product-defined HTTP-request,
@@ -19,7 +19,14 @@
 > deployed image and executable identities are maintained in the paired
 > runtime [README](https://github.com/maurodelazeri/tip-state-robinhood-runtime/blob/main/README.md)
 > and [RUNBOOK](https://github.com/maurodelazeri/tip-state-robinhood-runtime/blob/main/RUNBOOK.md),
-> not duplicated here. The upstream Nitro documentation continues below.
+> not duplicated here. During a remote seed, Nitro logs the seed start
+> immediately and accepted-record, logical-payload, and throughput progress
+> every 30 seconds on the producer. For a normal restart of the installed
+> release, run only the wrapper:
+> `sudo systemctl restart tip-state-robinhood-container.service`. Do not change
+> OCI/NLB backend flags.
+> Replica readiness withdraws routing during the seed and returns it after
+> admission. The upstream Nitro documentation continues below.
 
 <p align="center">
   <a href="https://arbitrum.io/">
