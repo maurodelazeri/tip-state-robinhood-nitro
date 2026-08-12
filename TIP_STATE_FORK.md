@@ -85,10 +85,33 @@ interchanged.
 | Exact-block functional tree | `2f1fa0081e27702d7c571b903138628d77174086` |
 | Exact-block documentation checkpoint | `8c64aac64a2f00a854c279bde681e5ed5e2b3206` |
 | Exact-block documentation tree | `5848335991d26afa7961252e5118b36e82259dc6` |
+| Uncapped runtime source checkpoint | `37012d98c5aecf4841e755a9522245df32b6c8d1` |
 | Runtime-patched Geth content SHA-256 | `01b66a95178ca6d43b6cd7a5d4a20bdb41e3f0ac38a83c6843b2bf80fa7934da` |
-| Runtime product closure SHA-256 | `6f5d648b98317b49f2a9e37237a8e227ff8977db29d6966a0fd67c920ae6fe7c` |
-| Complete Nitro product context SHA-256 | `95e6e6cd0e289827e1e068e05358cf20680beddb652e0774701776a75500fa04` |
-| Compiled chain-wire protocol SHA-256 | `9932978586331bfd40a8d5ef333bcd69663aa9a441c95e1efbe44a0797c7983c` |
+| Runtime product closure SHA-256 | `d1025104ec974e6570925d1bc5fb53f913194af5b98d9830ab2cf80acb83484d` |
+| Complete Nitro product context SHA-256 | `8db772122fc97aba08d68d10ecbf1e29d09bc3dff1e21c5dfe1903e170a7eb9d` |
+| Compiled chain-wire protocol SHA-256 | `f7ad8962c1bbeeb2269a637c859433e43dfe57574afdd3b85d68497427fb2030` |
+
+The runtime checkpoint above removes the product's HTTP request-admission
+middleware and the `eth_call` and `debug_traceCall` execution semaphores. The
+result has no product-defined RPS limit and no product-defined ceiling on
+concurrent HTTP requests, `eth_call` executions, or `debug_traceCall`
+executions. That statement does not promise infinite physical capacity:
+available CPU, RAM, file descriptors, sockets, kernel queues, network/cloud
+capacity, and downstream execution cost still determine realized throughput.
+Per-request gas, input-body, batch, response, and timeout bounds remain in
+force; they bound individual work and malformed or oversized inputs rather
+than throttling aggregate request rate or concurrency.
+
+The immediately preceding bounded source product is retained as immutable
+lineage only and is revoked for serving: runtime product closure
+`6f5d648b98317b49f2a9e37237a8e227ff8977db29d6966a0fd67c920ae6fe7c`,
+complete Nitro context
+`95e6e6cd0e289827e1e068e05358cf20680beddb652e0774701776a75500fa04`,
+and protocol
+`9932978586331bfd40a8d5ef333bcd69663aa9a441c95e1efbe44a0797c7983c`.
+Those hashes authenticate a historical predecessor; they are not acceptable
+current-release identities and must not be used to admit a producer or
+replica into the uncapped cohort.
 
 The documentation checkpoint is an immutable point in the source lineage, not
 a moving alias for whatever commit is currently at `main`. The paired
@@ -355,7 +378,7 @@ pass:
 set -euo pipefail
 bash scripts/materialize-nitro-product.sh
 test "$(bash scripts/hash-nitro-product.sh .product-work/nitro-product)" = \
-  95e6e6cd0e289827e1e068e05358cf20680beddb652e0774701776a75500fa04
+  8db772122fc97aba08d68d10ecbf1e29d09bc3dff1e21c5dfe1903e170a7eb9d
 ```
 
 The materializer does all of the following rather than mutating this checkout:
@@ -379,25 +402,50 @@ Build the producer image from that context:
 
 ```bash
 set -euo pipefail
-TIPSTATE_CANDIDATE_TAG="robinhood-nitro-tipstate:v3.11.2-95e6e6cd-rebuild-$(date -u +%Y%m%dT%H%M%S%NZ)"
-docker build --network host --target nitro-node \
-  --tag "$TIPSTATE_CANDIDATE_TAG" \
-  .product-work/nitro-product
+build_stamp=$(date -u +%Y%m%dT%H%M%S%NZ)
+TIPSTATE_BUILD_A="robinhood-nitro-tipstate:v3.11.2-8db77212-repeat-a-$build_stamp"
+TIPSTATE_BUILD_B="robinhood-nitro-tipstate:v3.11.2-8db77212-repeat-b-$build_stamp"
+for build_tag in "$TIPSTATE_BUILD_A" "$TIPSTATE_BUILD_B"; do
+  docker build --provenance=false --network host --target nitro-node \
+    --tag "$build_tag" \
+    .product-work/nitro-product
+done
+build_a_id=$(docker image inspect --format '{{.Id}}' "$TIPSTATE_BUILD_A")
+build_b_id=$(docker image inspect --format '{{.Id}}' "$TIPSTATE_BUILD_B")
+test -n "$build_a_id"
+test "$build_a_id" = "$build_b_id"
+TIPSTATE_CANDIDATE_TAG=$TIPSTATE_BUILD_A
+printf 'repeat-stable candidate %s id=%s\n' \
+  "$TIPSTATE_CANDIDATE_TAG" "$build_a_id"
 ```
 
-The qualified deployment used image
+`--provenance=false` is mandatory for every canonical image build. Docker 27
+enables provenance attestations by default; the generated attestations can
+make top-level image-index IDs vary even when the platform manifest, config,
+root filesystem, and Nitro executable bytes are identical. Disabling those
+attestations removes that unrelated variability, but it does not replace the
+repeatability gate. Build the same authenticated context twice under distinct
+tags and require exact equality of the two inspected `.Id` values before
+selecting either build as the release candidate. A mismatch is a failed build
+gate, not a reason to compare only selected layers or retag one image over the
+other.
+
+The revoked bounded predecessor built from context `95e6e6cd...` used image
 `sha256:7e5ce8980c16cf63eaedbb8d115bf49fca8fe5f9369f864f8d1a76b2a16dd676`
 and Nitro executable SHA-256
 `e3397dc351d8702528aad039a0ca745b58bcee8fa2f56e9a1fbfe8fbee41a94d`.
-Those are deployed-artifact identities, not substitutes for the source gates.
-Some upstream Docker stages use package repositories or tagged base images, so
-a later rebuild must be treated as a new artifact and requalified if its image
-identity differs. The authenticated source-context hash must still match. Do
-not assign the published `v3.11.2-95e6e6cd-full` tag until both historic
-artifact identities match; the paired runtime's `REBUILD.md` Section 8 contains
-the fail-closed inspection and promotion commands. A different repeat-stable
-image remains uniquely tagged and must complete the new-candidate release and
-qualification path in `RUNBOOK.md`.
+Those artifact identities are preserved solely as immutable deployment
+lineage; neither one is authorized for the current uncapped cohort. Deployed
+artifact identities are not source identities, and this source document does
+not embed a moving current image hash or final release tag. Some upstream
+Docker stages use package repositories or tagged base images, so every new
+build is a distinct candidate and must be requalified even when its
+authenticated source-context hash matches. Use the paired runtime
+[`README.md`](https://github.com/maurodelazeri/tip-state-robinhood-runtime/blob/main/README.md)
+and
+[`RUNBOOK.md`](https://github.com/maurodelazeri/tip-state-robinhood-runtime/blob/main/RUNBOOK.md)
+for the exact current image, executable, and standalone-binary identities and
+the fail-closed candidate promotion procedure.
 
 `scripts/materialize-nitro-product.sh` refuses to overwrite an existing
 destination. On a repeated build, preserve or deliberately remove only the
@@ -430,6 +478,14 @@ The proxy holds one fixed persistent TCP connection to each mandatory member.
 There is no replica discovery, optional member, quorum mode, reconnect path,
 database-backed serving path, ordinary-RPC fallback, provider fallback, or
 historical state lookup.
+
+Each replica exposes the uncapped runtime handler. There is no product rate
+limiter, HTTP admission semaphore, `eth_call` execution semaphore, or
+`debug_traceCall` execution semaphore, and the NLB must not impose an
+application RPS or concurrency cap. Individual requests still obey the
+configured gas, body, batch, response, and timeout bounds. OS/container/cloud
+resource capacity remains finite and must be observed operationally; resource
+exhaustion is not a product throttling policy or a correctness fallback.
 
 Startup is ordered as follows:
 
@@ -510,8 +566,9 @@ five layers, and all must pass for a changed product:
 4. complete Docker-context hash and image build; and
 5. a fresh three-cell seed, root agreement, catch-up to a fresh external
    target, zero backlog, live cadence, exact method/error/header tests,
-   byte-level payload comparison against ordinary Nitro, admission testing,
-   and bounded RPS/latency measurement.
+   byte-level payload comparison against ordinary Nitro, direct-cell
+   boundary-plus-one proof that the predecessor's HTTP/call/trace ceilings are
+   absent, NLB routing/health validation, and uncapped RPS/latency measurement.
 
 The exact live commands, method inventory, selector rules, qualification
 evidence, deployment identities, and coordinated restart procedure are in the
@@ -674,8 +731,8 @@ following are true:
   admitted by all three;
 - catch-up is proven against a fresh target with zero backlog and advancing
   cadence; and
-- all direct and load-balanced method, error, byte-parity, admission, and
-  performance gates pass before traffic is enabled.
+- all direct and load-balanced method, error, byte-parity, uncapped-concurrency,
+  routing, and performance gates pass before traffic is enabled.
 
 That checklist is the boundary between “the code was cloned” and “the complete
 Robinhood tip-state product was actually recovered.”

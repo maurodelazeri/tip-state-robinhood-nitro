@@ -4,8 +4,22 @@
 > This is the Robinhood tip-state Nitro product fork, not a standalone upstream
 > Nitro build context. Start with [TIP_STATE_FORK.md](./TIP_STATE_FORK.md) for
 > exact provenance, clean-room recovery, paired-runtime materialization,
-> validation, and upstream-sync rules. The upstream Nitro documentation
-> continues below.
+> validation, and upstream-sync rules. The current uncapped product binds
+> runtime source checkpoint
+> `37012d98c5aecf4841e755a9522245df32b6c8d1`, runtime product closure
+> `d1025104ec974e6570925d1bc5fb53f913194af5b98d9830ab2cf80acb83484d`,
+> complete Nitro product context
+> `8db772122fc97aba08d68d10ecbf1e29d09bc3dff1e21c5dfe1903e170a7eb9d`,
+> and chain-wire protocol
+> `f7ad8962c1bbeeb2269a637c859433e43dfe57574afdd3b85d68497427fb2030`.
+> It defines no product RPS limit and no product-defined HTTP-request,
+> `eth_call`, or `debug_traceCall` concurrency ceiling. Per-request gas, body,
+> batch, and timeout bounds remain correctness and resource-safety constraints;
+> finite host, kernel, network, and cloud capacity still applies. Exact current
+> deployed image and executable identities are maintained in the paired
+> runtime [README](https://github.com/maurodelazeri/tip-state-robinhood-runtime/blob/main/README.md)
+> and [RUNBOOK](https://github.com/maurodelazeri/tip-state-robinhood-runtime/blob/main/RUNBOOK.md),
+> not duplicated here. The upstream Nitro documentation continues below.
 
 <p align="center">
   <a href="https://arbitrum.io/">
